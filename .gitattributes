@@ -1,0 +1,2 @@
+# Preserve the patch bytes used by the console build fingerprint.
+cloud/console/patches/doso.patch -text

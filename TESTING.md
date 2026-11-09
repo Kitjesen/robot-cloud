@@ -251,4 +251,6 @@ cargo run --locked -p doso-cloud-gateway --example query -- 'D:\DOSO\private\rob
 
 `cargo fmt --all -- --check` 通过。首次直接使用现有 `target/` 执行离线工作区测试时，正在运行的 `doso-cloud-link.exe` 占用文件，Windows 返回拒绝访问（os error 5）；本轮没有停止该进程。改用独立的 `D:\DOSO\build-cache\robot-cloud-git-baseline-20261109` 构建目录后，`cargo test --workspace --locked --offline -j 1 --quiet` 实际通过 77 项，1 项保持 ignored。
 
+为保护控制台构建记录使用的补丁指纹，`.gitattributes` 禁止 `cloud/console/patches/doso.patch` 的换行转换。在 `core.autocrlf=true` 和 `false` 下分别使用 `git checkout-index` 恢复，文件 SHA-256 均与原件一致。
+
 本次为本地代码和测试验证，不代表云端部署、真实机器狗或视频端到端验收。
