@@ -1,0 +1,51 @@
+name: doso-telemetry-lab
+
+services:
+  postgres:
+    image: postgres:18.1@sha256:1090bc3a8ccfb0b55f78a494d76f8d603434f7e4553543d6e807bc7bd6bbd17f
+    restart: unless-stopped
+    mem_limit: 256m
+    command: [postgres, -c, shared_buffers=64MB, -c, max_connections=40]
+    environment:
+      POSTGRES_DB: thingsboard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a private database password}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres -d thingsboard]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  thingsboard:
+    image: thingsboard/tb-node:4.3.1.8@sha256:5e2c180f3c48a9f4efd3e19d2f03c41b510ff1a935f25083657e0cf046a94872
+    restart: unless-stopped
+    mem_limit: 1024m
+    ports:
+      - 127.0.0.1:18080:8080
+    environment:
+      TB_SERVICE_ID: doso-telemetry-lab
+      JAVA_TOOL_OPTIONS: -Xms256m -Xmx512m -XX:MaxDirectMemorySize=128m -XX:ActiveProcessorCount=2
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/thingsboard
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?Set a private database password}
+      TB_QUEUE_TYPE: in-memory
+      SQL_POSTGRES_TS_KV_PARTITIONING: MONTHS
+      SQL_TS_UPDATE_BY_LATEST_TIMESTAMP: "true"
+      MQTT_ENABLED: "false"
+      COAP_ENABLED: "false"
+      LWM2M_ENABLED: "false"
+      LWM2M_ENABLED_BS: "false"
+      SNMP_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "3"
+
+volumes:
+  postgres-data:

@@ -1,0 +1,16 @@
+DOSO management console
+
+Based on ThingsBoard Community Edition 4.3.1.8
+https://github.com/thingsboard/thingsboard/tree/v4.3.1.8
+Copyright The Thingsboard Authors
+Licensed under the Apache License, Version 2.0.
+
+DOSO modifications (2026-11-08): product identity, navigation, Chinese defaults,
+overview and interface styling. Existing upstream copyright and license notices
+remain applicable. Third-party component notices are included with the build.
+
+This software uses MiSans fonts.
+Copyright © 2020-2025 Beijing Xiaomi Mobile Software Co.,Ltd. All Rights Reserved.
+The original MiSans Font Intellectual Property License Agreement is bundled at
+/assets/fonts/MiSans-License.pdf and is accessible from the user menu.
+The bundled Regular, Medium, Demibold and Bold font files are unmodified.

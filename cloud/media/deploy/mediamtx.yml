@@ -1,0 +1,41 @@
+# MediaMTX 1.21.3. Provision a separate publish user for each registered device.
+logLevel: info
+logDestinations: [stdout]
+authMethod: internal
+authInternalUsers:
+  - user: any
+    ips: ['127.0.0.1/32', '::1/128']
+    permissions:
+      - action: read
+      - action: api
+api: true
+apiAddress: 127.0.0.1:19997
+metrics: false
+pprof: false
+playback: false
+rtsp: true
+rtspTransports: [tcp]
+rtspEncryption: strict
+rtspsAddress: :8322
+rtspServerCert: /etc/doso-media/tls/media.crt
+rtspServerKey: /etc/doso-media/tls/media.key
+rtspAuthMethods: [basic]
+rtmp: false
+hls: false
+srt: false
+moq: false
+webrtc: true
+webrtcAddress: 127.0.0.1:19889
+webrtcEncryption: false
+webrtcAllowOrigins: []
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: false
+webrtcAdditionalHosts: ['8.153.169.177']
+webrtcICEServers2: []
+pathDefaults:
+  record: false
+  overridePublisher: false
+paths:
+  '~^doso_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$':
+    source: publisher

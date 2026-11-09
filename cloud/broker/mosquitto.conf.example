@@ -1,0 +1,26 @@
+# Mosquitto 2.1.x template. Replace @ACL_PLUGIN_PATH@ with the installed
+# mosquitto_acl_file.so path; this template is not an installation command.
+plugin_load acl @ACL_PLUGIN_PATH@
+plugin_opt_acl_file /etc/doso-mqtt/acl.conf
+
+listener 8883
+listener_allow_anonymous false
+plugin_use acl
+cafile /etc/doso-mqtt/tls/device-ca.pem
+certfile /etc/doso-mqtt/tls/server.pem
+keyfile /etc/doso-mqtt/tls/server.key
+require_certificate true
+use_identity_as_username true
+use_username_as_clientid true
+tls_version tlsv1.2
+
+persistence false
+enable_control_api false
+max_packet_size 8192
+retain_available false
+log_dest stderr
+log_type error
+log_type warning
+log_type notice
+
+# No anonymous 1883 listener. The production CA private key is never installed here.

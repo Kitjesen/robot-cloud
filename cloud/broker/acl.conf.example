@@ -1,0 +1,18 @@
+# Replace this example UUID with the registered robot's device ID / certificate CN.
+user 00000000-0000-4000-8000-000000000001
+topic read doso/v1/devices/00000000-0000-4000-8000-000000000001/status/requests
+topic write doso/v1/devices/00000000-0000-4000-8000-000000000001/status/replies
+topic write doso/v1/devices/00000000-0000-4000-8000-000000000001/reporting/hello
+topic read doso/v1/devices/00000000-0000-4000-8000-000000000001/reporting/control
+topic write doso/v1/devices/00000000-0000-4000-8000-000000000001/reporting/acks
+topic write doso/v1/devices/00000000-0000-4000-8000-000000000001/status/reports
+topic read doso/v1/devices/00000000-0000-4000-8000-000000000001/video/control
+
+user doso-gateway
+topic write doso/v1/devices/+/status/requests
+topic read doso/v1/devices/+/status/replies
+topic read doso/v1/devices/+/reporting/hello
+topic write doso/v1/devices/+/reporting/control
+topic read doso/v1/devices/+/reporting/acks
+topic read doso/v1/devices/+/status/reports
+topic write doso/v1/devices/+/video/control

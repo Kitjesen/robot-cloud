@@ -1,0 +1,24 @@
+[Unit]
+Description=DOSO robot read-only cloud status gateway
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=doso-cloud
+Group=doso-cloud
+WorkingDirectory=/opt/doso
+EnvironmentFile=/etc/doso/robot-cloud/gateway/gateway.env
+ExecStart=/opt/doso/bin/doso-cloud-gateway
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+StateDirectory=doso-cloud
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

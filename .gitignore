@@ -1,0 +1,17 @@
+.runtime/
+.env
+*.key
+*.pem
+target/
+.env.*
+!.env.example
+!.env.*.example
+*.p12
+*.pfx
+.omx/
+__pycache__/
+*.pyc
+*.p8
+*.jks
+*.keystore
+*.local.json

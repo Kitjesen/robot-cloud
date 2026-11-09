@@ -1,0 +1,11 @@
+{
+  "program": "/usr/bin/ffmpeg",
+  "args": [
+    "-hide_banner", "-loglevel", "warning", "-nostdin",
+    "-f", "v4l2", "-video_size", "640x360", "-framerate", "15",
+    "-i", "/dev/video0", "-an", "-c:v", "libx264",
+    "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
+    "-g", "30", "-f", "rtsp", "-rtsp_transport", "tcp",
+    "rtsps://REPLACE-WITH-MEDIA-HOST:8322/doso_REPLACE-WITH-DEVICE-UUID"
+  ]
+}

@@ -1,0 +1,24 @@
+[Unit]
+Description=DOSO video media relay
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=doso-media
+Group=doso-media
+WorkingDirectory=/etc/doso-media
+ExecStart=/opt/doso/bin/mediamtx /etc/doso-media/mediamtx.yml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,35 @@
+# Local preparation: no public listener, recording or automatic camera capture.
+logLevel: info
+logDestinations: [stdout]
+authMethod: internal
+authInternalUsers:
+  - user: any
+    ips: ['127.0.0.1/32', '::1/128']
+    permissions:
+      - action: publish
+      - action: read
+      - action: api
+api: true
+apiAddress: 127.0.0.1:19997
+metrics: false
+pprof: false
+playback: false
+rtsp: true
+rtspAddress: 127.0.0.1:19554
+rtspTransports: [tcp]
+rtmp: false
+hls: false
+srt: false
+moq: false
+webrtc: true
+webrtcAddress: 127.0.0.1:19889
+webrtcEncryption: false
+webrtcAllowOrigins: ['http://127.0.0.1:19890']
+webrtcLocalUDPAddress: 127.0.0.1:19819
+webrtcLocalTCPAddress: ''
+webrtcIPsFromInterfaces: false
+webrtcAdditionalHosts: ['127.0.0.1']
+webrtcICEServers2: []
+paths:
+  '~^doso_[0-9a-f-]+$':
+    source: publisher

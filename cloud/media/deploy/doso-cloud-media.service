@@ -1,0 +1,26 @@
+[Unit]
+Description=DOSO authorized video sessions
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=doso-media
+Group=doso-media
+WorkingDirectory=/etc/doso-media
+# Fixed privileged lifecycle commands clear sessions across adapter crashes.
+ExecStartPre=+/usr/bin/systemctl restart doso-mediamtx.service
+ExecStart=/opt/doso/bin/doso-cloud-media /etc/doso-media/media.json
+ExecStopPost=+/usr/bin/systemctl stop doso-mediamtx.service
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

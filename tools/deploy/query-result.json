@@ -1,0 +1,20 @@
+{
+  "simulated": true,
+  "httpStatus": 200,
+  "path": "HTTPS -> ECS Gateway -> public MQTT -> Windows Rust Agent -> simulated Brainstem",
+  "snapshot": {
+    "control": {
+      "criticalMotorFault": false,
+      "motorOutputEnabled": false,
+      "owner": "CONTROL_OWNER_NONE"
+    },
+    "deviceId": "6e9661b3-fbd8-4c28-a0fc-8f43753c7f8e",
+    "observedAt": "2026-11-02T18:08:59.284Z",
+    "requestId": "cde6123d-8bcc-436c-a9dd-500284dfe51d",
+    "state": {
+      "kind": "CMS_STATE_KIND_GROUNDED",
+      "transition": "CMS_TRANSITION_KIND_NONE"
+    },
+    "transport": "local-insecure"
+  }
+}

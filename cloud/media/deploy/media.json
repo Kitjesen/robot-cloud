@@ -1,0 +1,8 @@
+{
+  "port": 19890,
+  "mediaOrigin": "http://127.0.0.1:19889",
+  "mediaApiOrigin": "http://127.0.0.1:19997",
+  "authorizeUrl": "https://api-test.dosorobotics.com/functions/v1/video-authorize",
+  "sourceGatewayUrl": "http://127.0.0.1:8130",
+  "sourceGatewayKey": "REPLACE_WITH_EXISTING_PRIVATE_GATEWAY_SERVICE_KEY"
+}
