@@ -22,13 +22,15 @@
 
 本轮新增的离线登记工具测试：`python -m unittest tools/deploy/test_render_device_registration.py -v`，3 项通过。它只生成待审查片段，不能代替 ECS 备份、`mosquitto --test-config`、reload 和真实 Gateway 查询。
 
+最新只读现场复核（2026-11-13 21:29 CST）：`brainstem.service` 已恢复 active，`13145` 可达；`doso-cloud-link` 和 `brainstem-grpc-proxy` 仍 inactive，`13146` 未监听；`can0`–`can3` 均为 UP、ERROR-ACTIVE、1 Mbps，IMU 设备存在。预检仍以退出码 1 拒绝继续，原因是现有映射脚本要求 `can0 → USB 1-2`，实际观察为 `can0 → USB 1-1.1`、`can1 → USB 1-2.1`。没有执行 `ip link set`、服务启停或 CAN 配置。[最新原件](../artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json)
+
 本轮命令原始输出：[local-lab-check.log](../artifacts/robot-cloud/real-connect-20261113/local-lab-check.log) · [local-auth-check.log](../artifacts/robot-cloud/real-connect-20261113/local-auth-check.log)
 
 ## 真实交付门
 
 ### G1：本机只读源
 
-当前 `brainstem.service` 已恢复 `flowfix10`，`13145` active；`13146` 没有监听。合并候选曾经成功绑定 `127.0.0.1:13146`，但停止时进入既有物理电机禁用确认流程并超时，因此没有安装为正式版本。候选的离线预检通过不等于真机生命周期通过。
+当前 `brainstem.service` 已恢复 `flowfix10`，`13145` active；`13146` 没有监听。合并候选曾经成功绑定 `127.0.0.1:13146`，但停止时进入既有物理电机禁用确认流程并超时，因此没有安装为正式版本。候选的离线预检通过不等于真机生命周期通过。最新现场四路 CAN 已重新为 UP，但物理角色映射仍未确认，不能进入候选维护。
 
 ### G3：云端设备登记
 
@@ -56,5 +58,5 @@
 
 G1 和 G3 同时通过后，才开启真实 `doso-cloud-link`。随后再做周期上报、网络短断、远程关闭、重启保持关闭和本地重新开启验收。
 
-本轮现场 G1 窗口已实际执行但在候选启动前中止：旧服务停止时发现 `can1`/PCAN USB 链路为 DOWN，`usbbus2` 返回 `errno=6`，systemd 最终进入 failed。候选没有启动，`13146` 没有监听；当前必须先恢复四路 CAN 和新鲜电机反馈，再进行下一次维护窗口。详见 [g1-field-failure.md](../artifacts/robot-cloud/real-connect-20261113/g1-field-failure.md)。
+本轮现场 G1 窗口已实际执行但在候选启动前中止：旧服务停止时发现 `can1`/PCAN USB 链路为 DOWN，`usbbus2` 返回 `errno=6`，systemd 最终进入 failed。候选没有启动，`13146` 没有监听。随后只读复核显示 Brainstem 已恢复、四路 CAN 均 UP，但 `can0` 的 USB parent 仍与既有映射脚本不一致；当前必须由现场确认物理总线标签后再进入下一次维护窗口。详见 [g1-field-failure.md](../artifacts/robot-cloud/real-connect-20261113/g1-field-failure.md) 和最新 [field-preflight](../artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json)。
 

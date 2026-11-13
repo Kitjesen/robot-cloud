@@ -11,7 +11,9 @@
 - 真实设备 TLS 到公网 MQTT 已通过；真实 Gateway 对研发 UUID 仍返回 `403 disabled`，ECS SSH 入口仍未开放。
 - 云端登记 patch 生成器 3 项通过；Gateway 公钥路径越界回归通过。生成器不连接 ECS、不修改输入文件。
 
-本轮在 2026-11-13 20:57 CST 复核了同一工作区：`cargo test --workspace` 为 82 项通过、1 项 ignored，`cargo fmt`、workspace Clippy、`lab check`（8 次模拟读取）和 `lab auth-check`（9 项 MQTT ACL 检查）均通过。`lab` 使用 `D:/DOSO/toolchains/mosquitto-2.1.2` 的本机 Mosquitto；没有启动真机服务、没有访问 `13146`，也没有修改 CAN 或云端配置。[复核清单](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/offline-regression-20261113T2058+0800.json)
+本轮在 2026-11-13 20:57 CST 复核了同一工作区：当时 `cargo test --workspace` 为 82 项通过、1 项 ignored，`cargo fmt`、workspace Clippy、`lab check`（8 次模拟读取）和 `lab auth-check`（9 项 MQTT ACL 检查）均通过。之后新增的 Gateway 路径回归使当前总数为 83 项通过、1 项 ignored。`lab` 使用 `D:/DOSO/toolchains/mosquitto-2.1.2` 的本机 Mosquitto；没有启动真机服务、没有访问 `13146`，也没有修改 CAN 或云端配置。[复核清单](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/offline-regression-20261113T2058+0800.json)
+
+随后 21:29 CST 只读现场复核显示 Brainstem active、13145 可达、四路 CAN 均 UP/ERROR-ACTIVE/1 Mbps、IMU 存在；`field-preflight.sh` 仍因 `can0` 的 USB parent 与既有映射脚本不一致而退出 1。没有启停服务、写 CAN 或访问 13146。
 
 ## G1 关闭竞态候选（2026-11-13）
 
