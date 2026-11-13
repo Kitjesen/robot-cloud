@@ -1,8 +1,8 @@
 # ARM64 云连接服务首次部署
 
-文档核对：2026-11-08。本文用于新名 `link-aarch64.tar.gz` 候选的首次部署准备。机器狗程序源码已移到 `robot/`，程序名为 `doso-cloud-link`，本机只读端口为 `13146`。2026-11-04新名包已核验架构和内容，目标机启动、安装和真实状态链路仍待验证；2026-11-07源码目录验证没有重建Linux发布包，不能以当前源码反推旧包能力。包的具体范围见 [BUILD.md](../../BUILD.md)。此前生成的 `agent-aarch64.tar.gz` 保留旧二进制、脚本和服务名称，须使用其包内旧说明。2026-11-04曾通过既有LAN `13145` 接口读取真实状态，本机只读监听和公网真机查询仍待验证。
+文档核对：2026-11-14。本文保留新名 `link-aarch64.tar.gz` 候选的部署准备资料。机器狗程序源码位于 `robot/`，程序名为 `doso-cloud-link`，本机只读端口为 `13146`。研发机已部署该候选、本机只读桥和 `doso-robot-authorizer`；云端设备登记已启用，但真实 MQTT/App 上报仍需设备恢复网络后验收。包的具体范围见 [BUILD.md](../../BUILD.md)。此前生成的 `agent-aarch64.tar.gz` 保留旧二进制、脚本和服务名称，须使用其包内旧说明。
 
-**当前不能按本文开通真机云连接。** 本地源码已实现远程 `enabled=false` 后原子保存关闭、停止采样并退出 MQTT，以及重启保持关闭和本地重新开启的模拟闭环；真实机器狗上的可信本地管理者入口、证书/ACL、13146 和 App 端到端仍未验收。`DOSO_CLOUD_ON` 只是进程启动配置，不是用户授权。下文是部署准备资料，启用流程必须等 G1/G3 真机门通过后执行。
+**当前不能在机器狗不可达时按本文开启真实云连接。** 本地源码已实现远程 `enabled=false` 后原子保存关闭、停止采样并退出 MQTT，以及重启保持关闭和本地重新开启的模拟闭环；研发机上的可信本地管理者入口、证书/ACL 和 `13146` 已部署并有历史只读证据，App 端到端和真实上报仍未验收。`DOSO_CLOUD_ON` 只是进程启动配置，不是用户授权。真实设备恢复可达后，必须先执行只读预检，再调用 `127.0.0.1:13148` authorizer API。
 
 ## 1. 核对包与目标机
 
@@ -43,7 +43,7 @@ systemd/doso-cloud-link.service
 
 ## 2. 先核对 Brainstem 回环入口
 
-本版本接入独立的本机只读状态端口，当前代码为待真机发布候选。配套 Brainstem 通过 `THUNDER_LOCAL_STATUS_ENABLED=true` 启用 `127.0.0.1:13146`，只注册 `GetControlStatus`。先完成该入口的受控发布，再只读检查当前监听。
+本版本接入独立的本机只读状态端口。配套 Brainstem 通过 `THUNDER_LOCAL_STATUS_ENABLED=true` 启用 `127.0.0.1:13146`，只注册 `GetControlStatus`。研发机已有历史只读读取证据；每次现场窗口仍须先检查当前监听和状态。
 
 ```sh
 ss -ltnp 'sport = :13146'
@@ -90,7 +90,7 @@ DOSO_GATEWAY_PUBLIC_KEY=/etc/doso/robot-cloud/agent/gateway-signing.pub
 
 ## 4. ECS 最小新增登记与 ACL
 
-先在受限工作目录用 [render-device-registration.py](render-device-registration.py) 生成只读 patch。它校验 UUID v4、现有登记没有重复 ID、ACL 没有同名用户，并输出 `enabled=false` 的设备条目、公钥副本和六条精确 ACL；它不会连接 ECS、修改输入文件或 reload Broker。
+先在受限工作目录用 [render-device-registration.py](render-device-registration.py) 生成只读 patch。它校验 UUID v4、现有登记没有重复 ID、ACL 没有同名用户，并输出设备条目、公钥副本和六条精确 ACL；它不会连接 ECS、修改输入文件或 reload Broker。研发机登记和只读启用已由 ECS 云助手完成，不能用本地生成器输出替代线上证据。
 
 ```sh
 python3 tools/deploy/render-device-registration.py \
@@ -103,7 +103,7 @@ python3 tools/deploy/render-device-registration.py \
 
 先检查 `registration-report.json`、`device-entry.json` 和 `acl-entry.conf`，再将它们作为一次受控变更上传。输出目录中的公钥是公开材料；私钥不应出现在目录中。
 
-ECS 入口恢复后可使用 [apply-device-registration.sh](apply-device-registration.sh) 执行同一变更。脚本要求 root，先备份现有登记/ACL，拒绝重复 UUID 和非预期六行 ACL，原子写入设备登记，运行 `mosquitto --test-config` 后仅 reload；任一步失败会恢复备份。第一次调用只允许 `enabled=false`，不会启动 Gateway 或机器狗 cloud-link。
+ECS 入口恢复后可使用 [apply-device-registration.sh](apply-device-registration.sh) 执行同一变更。脚本要求 root，先备份现有登记/ACL，拒绝重复 UUID 和非预期六行 ACL，原子写入设备登记，运行 `mosquitto --test-config` 后仅 reload；任一步失败会恢复备份。云端登记开关与机端授权是两个步骤；启用云端登记不会启动机器狗 cloud-link。
 
 ```sh
 sh tools/deploy/apply-device-registration.sh /受限路径/cloud-patch
