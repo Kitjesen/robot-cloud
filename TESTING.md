@@ -14,6 +14,7 @@
 - 云端登记 patch 生成器 3 项通过；Gateway 公钥路径越界回归通过。生成器不连接 ECS、不修改输入文件。
 - 远程关闭闭环通过：设备收到签名 `enabled=false` 后原子写入 `choice=false`、停止采样、退出 cloud-link；重启保持 `cloud_off`；本地 `choice=true` 配合新许可后恢复上报。证据：[local-remote-close-check.log](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/local-remote-close-check.log)
 - 最新本地 Rust 全工作区回归：`cargo test --workspace --locked --offline -j 1` 共 94 项通过、1 项 ignored、0 项失败；`cargo fmt --all -- --check` 通过。该命令包含当前未提交的 OTA workspace 变更，不能当作已部署或真机证据。
+- authorizer ARM64 制品复核：使用锁定离线 `cargo zigbuild` 重建成功，但本地 SHA256 `BADDBDB925E5F87067BB510C3B954D2D85C11EC95D51225555F3A5F3524A0E40` 与历史部署记录 `BADBDBD925E5F87067BB510C3B954D2D85C11EC95D51225555F3A5F3524A0E40` 不一致；机器狗不可达，暂不认定远端二进制与源码一致。[审计证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/authorizer-hash-audit-20261114.json)
 
 2026-11-14 现场复核：`192.168.66.64` ping、TCP 22 和 SSH 均超时，未到认证阶段；没有执行机端授权写入、服务启停、CAN 配置或运动控制。该失败原因是机器狗当前网络不可达，不是云端登记命令失败。最近一次可达证据仍是 flowfix11 的 `13145`/`13146` 只读读取及 authorizer 部署记录。
 

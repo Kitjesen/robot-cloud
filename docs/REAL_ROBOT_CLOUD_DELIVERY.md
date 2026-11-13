@@ -36,6 +36,7 @@ Brainstem 只读状态
 - 云端只读登记已通过 ECS 云助手从 `enabled=false` 改为 `enabled=true`，只允许设备状态和授权主题；远程运动控制仍未开放。[启用证据](../../artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json)
 - Gateway 按需查询和 `status/latest` 当前均返回 `503 unavailable`；端点可达但没有真实设备会话。[查询证据](../../artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json) · [latest 证据](../../artifacts/robot-cloud/real-connect-20261113/gateway-latest-20261114.json)
 - 本地 `doso-robot-authorizer` 已部署到 `127.0.0.1:13148`，choice 仍为 `false`，未执行真实开启。
+- 本地按锁定依赖重建的 authorizer ARM64 SHA256 与历史部署记录不一致；设备不可达，当前不能证明远端运行制品与源码相同。[哈希审计](../../artifacts/robot-cloud/real-connect-20261113/authorizer-hash-audit-20261114.json)
 
 以下条目保留为历史现场证据，设备恢复可达后须重新读取并生成新证据。
 

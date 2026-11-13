@@ -20,6 +20,8 @@
 
 本轮没有发送运动命令、没有使能电机、没有修改 CAN，也没有重启机器狗服务。
 
+制品一致性补充：本地按锁定依赖重建 authorizer ARM64 候选成功，但 SHA256 与部署记录不一致；机器狗不可达，无法读取远端 `/opt/doso/bin/doso-robot-authorizer` 做最终核对。下一次现场窗口先只读校验远端哈希，再决定是否需要重新部署；当前不把“authorizer 已部署”扩展为“当前源码制品已在机端运行”。[哈希审计](../artifacts/robot-cloud/real-connect-20261113/authorizer-hash-audit-20261114.json)
+
 ## 2026-11-14 状态修正
 
 云端设备登记已由 `enabled=false` 改为 `enabled=true`，只允许该设备的状态和授权主题；没有开放运动、遥操作、电机或任意 gRPC 透传。该动作只改变云端登记开关，不能替代机端授权，也不能证明机器狗已建立 MQTT 会话。
