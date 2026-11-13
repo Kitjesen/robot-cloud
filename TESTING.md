@@ -15,6 +15,8 @@
 
 随后 21:29 CST 只读现场复核显示 Brainstem active、13145 可达、四路 CAN 均 UP/ERROR-ACTIVE/1 Mbps、IMU 存在；`field-preflight.sh` 仍因 `can0` 的 USB parent 与既有映射脚本不一致而退出 1。没有启停服务、写 CAN 或访问 13146。
 
+同一现场窗口通过 `192.168.66.64:13145` 完成六个显式只读 RPC，其中五个成功：CMS ZERO、输出关闭、控制方 NONE、关键故障 false、16/16 电机 online、无状态码/错误、profile 为 `all_elbow`；`GetVoltage` 按源码核对条件跳过。该结果只证明现有主端口读状态正常，不替代 13146 验收或物理禁用确认。[原件](D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/current-read-api-20261112-native-owner.json)
+
 ## G1 关闭竞态候选（2026-11-13）
 
 定位到上一候选的具体竞态：关闭流程在 `Control disposed` 等迟到的输出撤销回调中再次启动 `joint.disable()`，而主关闭流程已经进入资源释放，导致物理禁用确认日志之后仍可能卡在 systemd 停止超时。修复在运行时开始关闭时设置一次性关闭闸门，并移除重复的关闭前 `invalidate`；关闭期间的迟到回调不再启动新的禁用操作，主关闭流程仍先等待现有物理禁用确认。
