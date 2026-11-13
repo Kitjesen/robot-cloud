@@ -116,6 +116,8 @@ finally:
     if os.path.exists(temporary):
         os.unlink(temporary)
 PY
+chown root:doso-cloud "$registry_file"
+chmod 640 "$registry_file"
 
 if grep -Fqx "user $device_id" "$acl_file"; then
     echo "device ID already exists in ACL" >&2
