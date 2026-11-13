@@ -1,6 +1,6 @@
 # 真实机器狗云连接交付计划
 
-更新：2026-11-13。目标是交付一条真实、只读、可回滚的机器狗云状态链路。云端不获得运动控制能力；站起、坐下、遥操作、External 运控和导航继续只由本地 SDK 与机器人安全链负责。
+更新：2026-11-14。目标是交付一条真实、只读、可回滚的机器狗云状态链路。云端不获得运动控制能力；站起、坐下、遥操作、External 运控和导航继续只由本地 SDK 与机器人安全链负责。
 
 ## 最终交付
 
@@ -21,18 +21,25 @@ Brainstem 只读状态
 
 | 门 | 通过条件 | 当前状态 | 责任范围 |
 | --- | --- | --- | --- |
-| G0 设备身份 | UUID、设备 CSR、MQTT 客户端证书、状态签名公钥和云端登记使用同一真实设备 ID | UUID 已登记；CSR/证书已生成；云端公钥登记未完成 | 业务库存、签发端、ECS 运维 |
-| G1 本机只读源 | 稳定 Brainstem 版本监听 `127.0.0.1:13146`，只注册 `GetControlStatus`，启动/退出不破坏原有安全关闭 | 候选关闭竞态已修复并构建通过；现场窗口在候选启动前暴露 PCAN/CAN 链路故障，旧服务停止超时并进入 failed；尚未现场启动 | Brainstem 候选与现场部署 |
-| G2 机器狗云连接 | cloud-link 安装、关闭态自检、证书加载、MQTT 连接和许可检查通过 | 二进制已安装；`DOSO_CLOUD_ON=false`；未启动 | robot-cloud/robot |
-| G3 云端通道 | Broker 接受真实设备证书；真实 UUID 有精确 ACL；Gateway 验证设备签名并返回状态 | TLS 握手通过；Gateway 对 UUID 返回 `403 disabled` | cloud/broker、cloud/gateway、ECS |
-| G4 业务与 App | 用户许可开启后，Gateway 状态进入业务库，App 显示状态与时间；历史投递不越权 | 模拟链路已通过；真机未通过 | 业务后端、App、telemetry |
+| G0 设备身份 | UUID、设备 CSR、MQTT 客户端证书、状态签名公钥和云端登记使用同一真实设备 ID | UUID、证书和公钥已登记；云端只读登记已启用；客户归属仍未绑定 | 业务库存、签发端、ECS 运维 |
+| G1 本机只读源 | 稳定 Brainstem 版本监听 `127.0.0.1:13146`，只注册 `GetControlStatus`，启动/退出不破坏原有安全关闭 | flowfix11 有历史真机监听和 `GetControlStatus` 证据；当前目标机不可达，需重新现场预检 | Brainstem 候选与现场部署 |
+| G2 机器狗云连接 | cloud-link 安装、关闭态自检、证书加载、MQTT 连接和许可检查通过 | ARM64 二进制和 authorizer 已安装；choice=false，cloud-link 未启动 | robot-cloud/robot |
+| G3 云端通道 | Broker 接受真实设备证书；真实 UUID 有精确 ACL；Gateway 验证设备签名并返回状态 | TLS 历史握手通过；云端登记已启用；当前 Gateway 查询 `503 unavailable`，因为设备未建立会话 | cloud/broker、cloud/gateway、ECS |
+| G4 业务与 App | 用户许可开启后，Gateway 状态进入业务库，App 显示状态与时间；历史投递不越权 | App/业务合同源码回归通过；模拟链路已通过；真机未通过 | 业务后端、App、telemetry |
 | G5 关闭与回滚 | 用户关闭后停止新读取/上报并断云；重启保持关闭；移除候选可回到旧 Brainstem | 远程关闭持久化、MQTT 退出、重启保持关闭和本地重新开启已通过模拟链路；真机断云未验收 | robot/cloud/业务后端 |
 
 只有 G0–G5 全部通过，才把真实机器狗云连接写成已交付。
 
-## 当前事实
+## 当前事实（2026-11-14 修正）
 
-- 真实机器狗 `192.168.66.64` 可达，Brainstem 主端口 `13145` active。
+- 机器狗 `192.168.66.64` 当前不可达：无 ARP、ping/TCP 22 超时；不能把下面的历史现场快照当作当前运行状态。
+- 云端只读登记已通过 ECS 云助手从 `enabled=false` 改为 `enabled=true`，只允许设备状态和授权主题；远程运动控制仍未开放。[启用证据](../../artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json)
+- Gateway 按需查询和 `status/latest` 当前均返回 `503 unavailable`；端点可达但没有真实设备会话。[查询证据](../../artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json) · [latest 证据](../../artifacts/robot-cloud/real-connect-20261113/gateway-latest-20261114.json)
+- 本地 `doso-robot-authorizer` 已部署到 `127.0.0.1:13148`，choice 仍为 `false`，未执行真实开启。
+
+以下条目保留为历史现场证据，设备恢复可达后须重新读取并生成新证据。
+
+- 真实机器狗 `192.168.66.64` 曾可达，历史 Brainstem 主端口 `13145` active。
 - flowfix10 不包含 `13146` 实现；设置环境变量不会创建端口。
 - 现有 `brainstem-grpc-proxy` 是完整 `13145` TCP 转发，不是只读桥，禁止启用。
 - 本地 ARM64 候选已构建并通过硬件前置检查，曾真实监听 `13146`；退出时在物理电机禁用确认阶段超时，已移除 drop-in 并恢复 flowfix10。
@@ -45,7 +52,7 @@ Brainstem 只读状态
 - 最新 udev 只读信息显示四个 PCAN-USB 都没有唯一序列号（`ID_SERIAL=_XCAN-USB`），因此不能从软件自动判断逻辑总线角色；当前接口路径为 `can0→1-1.1`、`can1→1-2.1`、`can2→1-1.2`、`can3→1-1.3`。必须由现场确认物理总线标签后才能调整映射，不能猜测或用电机报文试探。[拓扑快照](../../artifacts/robot-cloud/real-connect-20261113/failure-inspection.json)
 - cloud-link ARM64 候选已安装到 `/opt/doso/bin/doso-cloud-link`，关闭态运行输出 `cloud_off`。
 - 真实设备证书已用当前 Broker CA 签发，机器人到 `8.153.169.177:8883` 的 TLS 1.3 握手通过。
-- Gateway 真实 UUID 查询返回 `403 disabled`，表示云端登记/ACL/启用尚未完成。
+- Gateway 真实 UUID 查询曾返回 `403 disabled`；该结果发生在云端登记启用前，当前应以 `503 unavailable` 查询证据为准。
 - 10:20 CST 最新只读现场复核显示当前基线为 `flowfix10_hub_20261113`、PID 12818、`13145` active；`13146`、`5052` 和 `doso-cloud-link` 仍未运行。[现场快照](../../artifacts/robot-cloud/sdk-field-20261112/robot-102012.json)
 - 当前 `13145` 只读基线补测 10 秒完成：IMU 997 帧、99.392 Hz；关节 15,943 条合计事件，最大接收间隔 78 ms；两流均按预定窗口正常结束。[原始读取](../../artifacts/robot-cloud/sdk-field-20261112/raw-trace-10s-20261113T102350Z.json)
 - 当前 `13145` 单次只读 API 复核通过：`GetControlStatus` 为 `ZERO`、电机输出 false、控制方 NONE、无关键故障；`GetMotorStatus` 返回 16 行，其中 12 online、4 offline。该结果仅是现有主控制端口的只读对照，不是 `13146` 验收。[API 原件](../../artifacts/robot-cloud/sdk-field-20261112/current-read-api-20261112-native-owner.json)

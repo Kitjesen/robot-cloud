@@ -18,7 +18,7 @@ App/业务合同补充：App 远程状态相关 Node 测试 30/30 通过，Supab
 
 **22:55 CST 当前只读复核：** flowfix11 的实际映射脚本已按当前 USB 拓扑通过，四路 CAN 为 UP/ERROR-ACTIVE/1 Mbps，`127.0.0.1:13146` 已监听；机器狗本机 `GetControlStatus` 读回 GROUNDED、输出关闭、控制方 NONE、无关键故障。新 ARM64 cloud-link 候选已安装但保持 `DOSO_CLOUD_ON=false`，未连接云端。[preflight](artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json) · [13146 读取](artifacts/robot-cloud/real-connect-20261113/read-current-13146.json) · [cloud-link 安装](artifacts/robot-cloud/real-connect-20261113/cloud-link-install.json)
 
-**云端入口复核：** 当前开发机公网 IP 为 `96.44.160.185`，MQTT ECS `8.153.169.177:22` 仍不可达；业务 ECS 到 MQTT ECS 的 22 也被拦截。已改用已登录的阿里云 ECS 云助手完成受控登记，不改安全组、不开放 SSH；设备登记保持 `enabled=false`，Mosquitto 配置检查通过，Mosquitto 与 Gateway 均 active。[入口探测](artifacts/robot-cloud/real-connect-20261113/cloud-ssh-preflight-current.json) · [云助手登记证据](artifacts/robot-cloud/real-connect-20261113/cloud-assistant-registration-20261114.json)
+**云端入口复核（登记前历史状态）：** 当前开发机公网 IP 为 `96.44.160.185`，MQTT ECS `8.153.169.177:22` 仍不可达；业务 ECS 到 MQTT ECS 的 22 也被拦截。已改用已登录的阿里云 ECS 云助手完成受控登记，不改安全组、不开放 SSH；当时设备登记保持 `enabled=false`，随后已由 ECS 云助手启用为只读 `enabled=true`。[入口探测](artifacts/robot-cloud/real-connect-20261113/cloud-ssh-preflight-current.json) · [初始登记](artifacts/robot-cloud/real-connect-20261113/cloud-assistant-registration-20261114.json) · [启用证据](artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json)
 
 **本地授权入口部署：** 真实机器狗已安装 `doso-robot-authorizer.service`，监听 `127.0.0.1:13148`，Bearer token 校验通过，安装 gate 已切换为 `DOSO_CLOUD_ON=true`，choice 仍为 `false`，cloud-link 保持 inactive/disabled。授权调用开始前机器狗从局域网消失（无 ARP、ping、TCP 22），因此尚未声称 MQTT hello/status 已发送。[部署证据](artifacts/robot-cloud/real-connect-20261113/authorizer-deploy-20261114.json)
 
