@@ -1,6 +1,6 @@
 # 真实机器狗云连接交付状态
 
-更新时间：2026-11-13（Asia/Shanghai）
+更新时间：2026-11-14（Asia/Shanghai）
 
 这份记录只写本轮实际执行结果。模拟链路、源码测试、云端公网探测和真机部署分开统计。
 
@@ -14,11 +14,17 @@
 | 本机模拟云链路 | 通过 | `lab check`：许可、签名状态、状态变化、读失败保留旧时间、关闭、过期、重连、视频、本地关闭持久化 |
 | 本机 MQTT 权限 | 9 项通过 | `lab auth-check`：合法证书、无证书、不受信、跨设备、设备控制主题越权和 Gateway 身份检查 |
 | 机器狗到公网 MQTT | TLS 通过 | `8.153.169.177:8883`，TLS 1.3，服务端证书校验通过 |
-| 真实 Gateway 查询 | 可达但拒绝 | 真实 UUID `d82a831a-2e86-4b46-975b-3d42473583b7` 返回 `403 disabled`，说明云端登记尚未启用 |
-| 云端登记变更工具 | 通过 | `render-device-registration.py` 离线校验 UUID v4、重复登记和 ACL 用户，生成 `enabled=false` 的设备条目、公钥副本与六条精确 ACL；不连接 ECS、不改输入、不 reload |
+| 真实 Gateway 查询 | 历史结果 | 真实 UUID 曾返回 `403 disabled`；随后云端登记已启用，尚未在机器狗恢复可达后重新完成真实 MQTT 查询 |
+| 云端登记变更工具 | 通过 | `render-device-registration.py` 离线校验 UUID v4、重复登记和 ACL 用户；实际 ECS 登记与启用通过阿里云 ECS 云助手完成，见 [启用证据](../artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json) |
 | Gateway 登记路径边界 | 通过 | 拒绝绝对路径、`..` 和其他非普通路径，避免登记文件被篡改后加载登记目录外的公钥；Gateway 27 项测试通过 |
 
 本轮没有发送运动命令、没有使能电机、没有修改 CAN，也没有重启机器狗服务。
+
+## 2026-11-14 状态修正
+
+云端设备登记已由 `enabled=false` 改为 `enabled=true`，只允许该设备的状态和授权主题；没有开放运动、遥操作、电机或任意 gRPC 透传。该动作只改变云端登记开关，不能替代机端授权，也不能证明机器狗已建立 MQTT 会话。
+
+随后复核 `192.168.66.64` 的 ping、TCP 22 和 SSH 均超时，未到认证阶段；没有执行机端启动、停止、授权写入、CAN 配置或运动控制。最近一次可达证据仍是 flowfix11 的 `13145`/`13146` 只读状态和 authorizer 部署记录，因此当前下一步必须先恢复机器狗局域网可达，再做只读预检和授权开启。
 
 本轮新增的离线登记工具测试：`python -m unittest tools/deploy/test_render_device_registration.py -v`，3 项通过。它只生成待审查片段，不能代替 ECS 备份、`mosquitto --test-config`、reload 和真实 Gateway 查询。
 
@@ -48,7 +54,7 @@
 
 ### G3：云端设备登记
 
-真实设备签名公钥和六条精确 MQTT ACL 已通过阿里云 ECS 云助手写入 MQTT ECS `8.153.169.177`，设备登记为 `enabled=false`；Mosquitto 配置检查通过，Mosquitto 与 Gateway 均 active。SSH `22` 仍保持安全组拦截，未新增入口；云助手登记证据见 [cloud-assistant-registration-20261114.json](../artifacts/robot-cloud/real-connect-20261113/cloud-assistant-registration-20261114.json)。这一步只完成云端库存、签名公钥和 ACL 登记，不代表机器狗云连接已开启。
+真实设备签名公钥和六条精确 MQTT ACL 已通过阿里云 ECS 云助手写入 MQTT ECS `8.153.169.177`，设备登记随后已改为 `enabled=true`；Mosquitto 配置检查通过，Mosquitto 与 Gateway 均 active。SSH `22` 仍保持安全组拦截，未新增入口；登记与启用证据见 [cloud-assistant-registration-20261114.json](../artifacts/robot-cloud/real-connect-20261113/cloud-assistant-registration-20261114.json) 和 [cloud-assistant-enable-20261114.json](../artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json)。这一步只完成云端只读接入开关，不代表机器狗云连接已开启。
 
 本地授权入口已部署到机器狗：`doso-robot-authorizer.service` 监听 `127.0.0.1:13148`，通过受保护 Bearer token 原子写入 choice，并固定调用 `systemctl start|stop doso-cloud-link.service`；安装 gate 为 `DOSO_CLOUD_ON=true`，choice 初始仍为 `false`。部署后机器狗网络暂时不可达，尚未执行授权开启或真实 MQTT 上报验收。[authorizer 部署证据](../artifacts/robot-cloud/real-connect-20261113/authorizer-deploy-20261114.json)
 
@@ -57,8 +63,8 @@
 1. 备份线上 `devices.json` 和 `acl.conf`；
 2. 追加真实 UUID 的公钥、设备条目和六条 ACL，第一次保持 `enabled=false`；
 3. `mosquitto --test-config` 通过后只 reload；
-4. 先完成 G1，再将设备登记改为 `enabled=true`；
-5. 在有效用户许可下启动 `doso-cloud-link`，只做一次 `status.read`。
+4. 先完成 G1，再确认云端登记为 `enabled=true`；
+5. 在有效用户许可下通过 `127.0.0.1:13148` 的 authorizer API 启动 `doso-cloud-link`，只做一次 `status.read`。
 
 不能用 `brainstem-grpc-proxy.service` 绕过 G1；它是完整 `13145` TCP 转发，不是只读状态桥。
 

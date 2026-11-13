@@ -213,9 +213,12 @@ The saved choice is read again on startup; while running, off is detected within
 and expired reporting permissions do not rewrite this local choice. Local lab
 fixtures create their own explicitly simulated choice file.
 
-This file is the local persistence input, not proof of account ownership. There
-is no product UI, owner-authorized writer or public local enable API yet. Do not
-present writing `true` manually as a completed customer authorization flow.
+This file is the local persistence input, not proof of account ownership. The
+research robot has a local owner-authorized writer (`doso-robot-authorizer` on
+`127.0.0.1:13148`) that validates a protected bearer token, writes the choice
+atomically, and starts or stops only the fixed cloud-link service. The product
+App wiring and real-device enable/telemetry acceptance are still pending. Do
+not present a manually written `true` value as a completed customer flow.
 
 Remote status upload additionally requires the existing account/device consent
 and a confirmed reporting permission. A network outage while enabled must not

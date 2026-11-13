@@ -1,0 +1,16 @@
+{
+  "observedAt": "2026-11-14T05:03:31+08:00",
+  "transport": "aliyun_ecs_cloud_assistant",
+  "instanceId": "i-uf6hb2phe34p0mt1xfca",
+  "host": "8.153.169.177",
+  "invokeId": "t-sh0730qx7zr2uio",
+  "deviceId": "d82a831a-2e86-4b46-975b-3d42473583b7",
+  "enabled": true,
+  "scope": "device-status-and-consent-topics-only",
+  "remoteMotion": false,
+  "sshTcp22": "blocked_unchanged",
+  "serviceReload": "successful",
+  "robotTelemetry": "not_observed",
+  "robotReachability": "192.168.66.64_unreachable_during_followup",
+  "note": "Cloud-side read-only registration is enabled. This is not evidence that the robot established MQTT or sent hello/status; the robot must be reachable and locally authorized before that can be verified."
+}

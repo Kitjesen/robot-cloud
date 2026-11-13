@@ -1,16 +1,18 @@
 # 接入测试
 
-更新：2026-11-13。本页汇总实际验证和可复现入口；每节按其当次源码、部署与硬件范围解释。当前功能状态及产品顺序见 [PROGRESS.md](PROGRESS.md)，本轮真实机器狗交付记录见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。
+更新：2026-11-14。本页汇总实际验证和可复现入口；每节按其当次源码、部署与硬件范围解释。当前功能状态及产品顺序见 [PROGRESS.md](PROGRESS.md)，本轮真实机器狗交付记录见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。
 
-## 本轮回归（2026-11-13）
+## 本轮回归（2026-11-14）
 
 - DOSO Rust SDK：124 项通过。
 - robot-cloud workspace：84 项通过、1 项 ignored；无失败。
 - `cargo fmt --all -- --check` 和 workspace Clippy `-D warnings` 通过。
 - `lab check` 和 `lab auth-check` 通过；两者使用本机模拟 Brainstem/Mosquitto，不是真机证据。
-- 真实设备 TLS 到公网 MQTT 已通过；真实 Gateway 对研发 UUID 仍返回 `403 disabled`，ECS SSH 入口仍未开放。
+- 真实设备 TLS 到公网 MQTT 的历史探测已通过；云端登记随后已由 ECS 云助手启用为 `enabled=true`，ECS SSH 入口仍未开放。真实机器狗当前不可达，因此尚未完成 MQTT `hello/status` 验收。[启用证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json)
 - 云端登记 patch 生成器 3 项通过；Gateway 公钥路径越界回归通过。生成器不连接 ECS、不修改输入文件。
 - 远程关闭闭环通过：设备收到签名 `enabled=false` 后原子写入 `choice=false`、停止采样、退出 cloud-link；重启保持 `cloud_off`；本地 `choice=true` 配合新许可后恢复上报。证据：[local-remote-close-check.log](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/local-remote-close-check.log)
+
+2026-11-14 现场复核：`192.168.66.64` ping、TCP 22 和 SSH 均超时，未到认证阶段；没有执行机端授权写入、服务启停、CAN 配置或运动控制。该失败原因是机器狗当前网络不可达，不是云端登记命令失败。最近一次可达证据仍是 flowfix11 的 `13145`/`13146` 只读读取及 authorizer 部署记录。
 
 本轮在 2026-11-13 20:57 CST 复核了同一工作区：当时 `cargo test --workspace` 为 82 项通过、1 项 ignored，`cargo fmt`、workspace Clippy、`lab check`（8 次模拟读取）和 `lab auth-check`（9 项 MQTT ACL 检查）均通过。之后新增 Gateway 路径回归和远程关闭持久化回归，当前总数为 84 项通过、1 项 ignored。`lab` 使用 `D:/DOSO/toolchains/mosquitto-2.1.2` 的本机 Mosquitto；没有启动真机服务、没有访问 `13146`，也没有修改 CAN 或云端配置。[复核清单](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/offline-regression-20261113T2058+0800.json)
 
