@@ -6,5 +6,6 @@
   "remoteMotion": false,
   "package": "doso-robot-authorizer-aarch64.tar.gz",
   "sourceCommit": "a4ab2fc",
+  "workspacePreexistingChanges": ["Cargo.lock", "Cargo.toml", "ota/"],
   "remoteDeployment": "pending_robot_reachability"
 }
