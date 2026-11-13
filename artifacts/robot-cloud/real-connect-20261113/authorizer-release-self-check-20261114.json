@@ -1,0 +1,10 @@
+{
+  "recordedAt": "2026-11-14T06:32:00+08:00",
+  "release": "D:/DOSO/robot-cloud/artifacts/robot-cloud/releases/20261114-authorizer-aarch64",
+  "binarySha256": "BADDBDB925E5F87067BB510C3B954D2D85C11EC95D51225555F3A5F3524A0E40",
+  "packageSha256": "F4CCC2A980A85D73C529146F19D16782D6E3B9FCCADD6A4645190DE817C88B92",
+  "manifestBinaryMatch": true,
+  "manifestPackageMatch": true,
+  "remoteDeployment": "pending_robot_reachability",
+  "remoteMotion": false
+}
