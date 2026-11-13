@@ -17,6 +17,8 @@
 
 2026-11-14 现场复核：`192.168.66.64` ping、TCP 22 和 SSH 均超时，未到认证阶段；没有执行机端授权写入、服务启停、CAN 配置或运动控制。该失败原因是机器狗当前网络不可达，不是云端登记命令失败。最近一次可达证据仍是 flowfix11 的 `13145`/`13146` 只读读取及 authorizer 部署记录。
 
+现场预检脚本已补充只读检查 `doso-robot-authorizer.service`、`13148`、`/var/lib/doso-cloud/choice` 和 `DOSO_CLOUD_ON`，仍不会启动服务或修改 CAN；`bash -n tools/deploy/field-preflight.sh` 通过。设备恢复后先执行该预检，再进入授权开启窗口。
+
 本轮在 2026-11-13 20:57 CST 复核了同一工作区：当时 `cargo test --workspace` 为 82 项通过、1 项 ignored，`cargo fmt`、workspace Clippy、`lab check`（8 次模拟读取）和 `lab auth-check`（9 项 MQTT ACL 检查）均通过。之后新增 Gateway 路径回归和远程关闭持久化回归，当前总数为 84 项通过、1 项 ignored。`lab` 使用 `D:/DOSO/toolchains/mosquitto-2.1.2` 的本机 Mosquitto；没有启动真机服务、没有访问 `13146`，也没有修改 CAN 或云端配置。[复核清单](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/offline-regression-20261113T2058+0800.json)
 
 随后 21:29 CST 只读现场复核显示 Brainstem active、13145 可达、四路 CAN 均 UP/ERROR-ACTIVE/1 Mbps、IMU 存在；`field-preflight.sh` 仍因 `can0` 的 USB parent 与既有映射脚本不一致而退出 1。没有启停服务、写 CAN 或访问 13146。
