@@ -4,6 +4,8 @@
 
 工程根目录为 `D:\DOSO\robot-cloud`，Cargo workspace 自包含。机器狗云连接、云端Gateway、媒体适配和遥测投递按进程分工，实际部署程度分别见 [PROGRESS.md](PROGRESS.md)。
 
+2026-11-12 权限边界确认：设备凭据只允许自身获准的上报和确认，不授予云端管理权；DOSO云端禁止运动控制、任意gRPC透传及运控隧道。本地SDK保留操控，继续经机端控制权与安全链。云状态源固定为Brainstem `GetControlStatus`，详细规则见 [CONTRACT.md](CONTRACT.md#设备云端与本地-sdk-的权限边界2026-11-12-确认)。本段更新不代表新增部署。
+
 ## 进程与目录
 
 | 目录 / 组件 | 责任与部署位置 |
@@ -37,6 +39,37 @@ App ↔ 现有账号/设备后端 ↔ PostgreSQL
 ```
 
 按需查询单独沿用 `业务后端 → HTTPS / 服务 Bearer → ECS Nginx :443 → Gateway 127.0.0.1:8130`。持续状态由 Gateway 主动同步业务接口；两种服务凭据职责不同，均不进入 App 或狗端。
+
+## 云端读取链路（不是云端直连 13146）
+
+`127.0.0.1:13146` 只存在于机器狗 Linux 主机。云服务器不能访问这个回环地址；它只被同一台机器上的 `doso-cloud-link` 使用。完整的一次读取如下：
+
+```text
+App
+  → 业务后端：校验登录、设备归属、用户许可
+  → HTTPS / 服务凭据
+ECS Gateway
+  → MQTT 5 / mTLS：status.read（自己的 deviceId、requestId、过期时间）
+机器狗 doso-cloud-link
+  → 127.0.0.1:13146：GetControlStatus（单次只读）
+Brainstem
+  ← 状态结果
+机器狗 doso-cloud-link
+  → MQTT 5 / mTLS：签名 status.result
+ECS Gateway
+  → 校验设备签名、请求身份、许可版本和新鲜度
+  → 返回业务后端 / 写入最新状态投影
+App
+  ← 通过业务 API 读取状态
+```
+
+这条链路目前是“请求一次、读取一次、回复一次”，不是把 Brainstem gRPC 暴露到公网，也不是 App 直接连 MQTT。周期状态由 Gateway 后台同步业务接口；历史投递由独立 `doso-cloud-telemetry` 在业务库接受状态后写入 ThingsBoard。ThingsBoard 不是机器狗的控制入口。
+
+`13146` 的价值是**服务端能力隔离**：即使 `doso-cloud-link` 被错误调用或被拿到本机网络权限，它连接的也只有 Brainstem 注册的只读方法；站起、速度、电机使能、关节目标和 External 控制不在这个端口上。它不是为了让云端“找到”机器狗，而是为了让狗端云连接进程不持有 Brainstem 完整控制接口。
+
+这也带来一个明确的交付条件：`THUNDER_LOCAL_STATUS_ENABLED=true` 的 Brainstem 监听和对应版本的 `doso-cloud-link` 必须成对安装、成对验收。当前目标机尚未完成这项部署，`13146` 未监听时，云端状态读取应返回不可用，不能把 `13145` 的网络可达写成云端链路已通。
+
+如果未来 Brainstem 能提供经过服务端强制执行的只读 mTLS 身份和方法 ACL，可以评估让 `doso-cloud-link` 直接使用回环 `13145`，删除 `13146` 这一跳；在没有这种服务端隔离证据前，不能仅靠客户端“只调用 GetControlStatus”替代只读边界。
 
 RM500U 提供 IP 网络，拨号和路由由系统管理。云连接服务通过系统路由使用 Wi-Fi 或 5G。
 

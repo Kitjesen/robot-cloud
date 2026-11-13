@@ -50,6 +50,30 @@ async fn video_requires_a_live_registered_device_and_no_commands() {
     );
 }
 
+#[test]
+fn registry_rejects_public_key_paths_outside_its_directory() {
+    let fixture = Fixture::new();
+    for public_key_path in [
+        "../device.pub",
+        fixture.directory.join("device.pub").to_str().unwrap(),
+    ] {
+        fs::write(
+            fixture.directory.join("devices.json"),
+            json!({ "devices": [{
+                "deviceId": fixture.device_id,
+                "enabled": true,
+                "publicKeyPath": public_key_path
+            }] })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture.gateway.device_key(&fixture.device_id),
+            Err(Error::Unavailable)
+        ));
+    }
+}
+
 struct Fixture {
     directory: PathBuf,
     gateway: Arc<Gateway>,
@@ -341,6 +365,129 @@ async fn http_auth_and_body() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(fixture.queued() == 0);
+}
+
+#[tokio::test]
+async fn device_signature_is_not_a_gateway_service_credential() {
+    let fixture = Fixture::new();
+    let permission = fixture.grant();
+    let key = "test-backend-service-key-32-characters";
+    let router = app(fixture.gateway.clone(), key).unwrap();
+    let device_token =
+        String::from_utf8(encode_signed(&permission, &fixture.device_key).unwrap()).unwrap();
+    for (method, route, body) in [
+        (
+            "PUT",
+            "reporting",
+            serde_json::to_string(&permission).unwrap(),
+        ),
+        ("PUT", "video", r#"{"enabled":true}"#.into()),
+        ("GET", "status/latest", String::new()),
+        ("POST", "status", String::new()),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(format!("/api/v1/robots/{}/{route}", fixture.device_id))
+                    .header(header::AUTHORIZATION, format!("Bearer {device_token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert!(fixture.latest()["permission"].is_null());
+    assert!(!fixture.directory.join("reporting.json").exists());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/v1/robots/{}/reporting", fixture.device_id))
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .body(Body::from(serde_json::to_vec(&permission).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn device_messages_cannot_enable_a_cloud_disabled_permission() {
+    let fixture = Fixture::new();
+    let mut disabled = fixture.grant();
+    disabled.enabled = false;
+    fixture
+        .gateway
+        .set_reporting(&fixture.device_id, disabled.clone())
+        .unwrap();
+    fixture.ack(&disabled);
+    let before = fixture.latest();
+    let saved = fs::read(fixture.directory.join("reporting.json")).unwrap();
+    let mut proposed = disabled;
+    proposed.enabled = true;
+    proposed.consent_version += 1;
+    let control = robot_cloud_common::reporting::Control {
+        v: 1,
+        kind: "reporting.control".into(),
+        device_id: fixture.device_id.clone(),
+        permission: proposed.clone(),
+    };
+    fixture.gateway.accept_reporting(
+        &topics(&fixture.device_id).unwrap().control,
+        &encode_signed(&control, &fixture.device_key).unwrap(),
+        false,
+    );
+    fixture.ack(&proposed);
+    fixture.report(&proposed, 1, false, now_ms());
+    assert_eq!(fixture.latest(), before);
+    assert_eq!(
+        fs::read(fixture.directory.join("reporting.json")).unwrap(),
+        saved
+    );
+
+    fixture
+        .gateway
+        .set_reporting(&fixture.device_id, proposed.clone())
+        .unwrap();
+    fixture.ack(&proposed);
+    fixture.report(&proposed, 1, false, now_ms());
+    assert_eq!(fixture.latest()["fresh"], true);
+}
+
+#[tokio::test]
+async fn service_credential_does_not_expose_cloud_motion_routes() {
+    let fixture = Fixture::new();
+    let key = "test-backend-service-key-32-characters";
+    let router = app(fixture.gateway.clone(), key).unwrap();
+    for (method, route) in [
+        ("POST", "motion"),
+        ("POST", "teleop"),
+        ("PUT", "motors/enable"),
+        ("POST", "grpc"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(format!("/api/v1/robots/{}/{route}", fixture.device_id))
+                    .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                    .body(Body::from(
+                        r#"{"method":"/brainstem.api.v1.RobotControl/EnableMotors"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    assert!(fixture.queued() == 0);
+    assert!(fixture.latest()["permission"].is_null());
+    assert!(!fixture.directory.join("reporting.json").exists());
 }
 
 #[tokio::test]

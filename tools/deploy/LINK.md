@@ -90,6 +90,19 @@ DOSO_GATEWAY_PUBLIC_KEY=/etc/doso/robot-cloud/agent/gateway-signing.pub
 
 ## 4. ECS 最小新增登记与 ACL
 
+先在受限工作目录用 [render-device-registration.py](render-device-registration.py) 生成只读 patch。它校验 UUID v4、现有登记没有重复 ID、ACL 没有同名用户，并输出 `enabled=false` 的设备条目、公钥副本和六条精确 ACL；它不会连接 ECS、修改输入文件或 reload Broker。
+
+```sh
+python3 tools/deploy/render-device-registration.py \
+  --device-id <真实设备UUID> \
+  --public-key /受限路径/device-signing.pub \
+  --devices /受限路径/devices.json \
+  --acl /受限路径/acl.conf \
+  --output-dir /受限路径/cloud-patch
+```
+
+先检查 `registration-report.json`、`device-entry.json` 和 `acl-entry.conf`，再将它们作为一次受控变更上传。输出目录中的公钥是公开材料；私钥不应出现在目录中。
+
 准备启用真实设备时，由运维完成以下 ECS 配置。先备份现有登记和 ACL，核对现有内容，并保留所有原条目。设备公钥存为 `/etc/doso/robot-cloud/gateway/device-真实UUID-signing.pub`，所有者 `root:doso-cloud`、权限 640。
 
 在现有 `/etc/doso/robot-cloud/gateway/devices.json` 的 `devices` 数组中追加一个条目，确认同一 UUID 只有一条。下面为单个条目的结构，替换占位符后再加入现有数组。

@@ -7,6 +7,26 @@ explicitly marked product targets. Current delivery status is maintained in
 
 ## 客户数据与告警责任
 
+### 设备、云端与本地 SDK 的权限边界（2026-11-12 确认）
+
+设备凭据仅用于该设备获准的上报、请求应答与执行确认，不授予云端设备归属、用户授权、告警规则、平台配置或其他设备的管理权。云端服务凭据、管理 Bearer、平台映射及投递队列元数据不进入设备程序或客户公开响应。
+
+云端禁止运动控制：不得通过云状态链、通用 RPC、代理或隧道转发站坐、速度、电机使能、关节目标及控制器切换。已有云状态请求仅允许严格定义的 `status.read`，机端固定调用 `GetControlStatus`；媒体观看沿用独立许可，不能附带运动方法。合法云端签名或服务凭据也不改变该范围。本地 Rust SDK 保留运动、导航与外部控制器接口，继续经过机端控制权、就绪和安全链。
+
+普通客户获得设备身份、业务状态、已授权位置/历史和自身操作结果；不公开平台设备映射、归属版本、许可版本、投递队列计数、内部端点与运行配置。分页一致性、请求结果核查及机端并发切换所需的不透明标识是协议用途，不作为客户设置或界面信息。删除技术元数据时必须保留实际并发校验、断段、取消及未知提交语义。
+
+机器人连接 IP、GNSS 位置、连接/活动异常的产品数据源与实施顺序见
+[机器人云端管理](docs/MONITORING.md)。IP 指接入端观察到的网络出口，不推断地理位置；
+账号登录 IP 与机器人连接 IP 分别处理。该说明不扩大现有采集许可或人员可见范围。
+
+### 账号登录 IP 保存与本人查看（2026-11-12 补充）
+
+用户明确本地 App 登录的账号也可查看自身登录 IP。登录 IP 是账号安全信息，不应一律归为客户不可见的内部数据。云端保存可信认证来源给出的登录 IP、登录时间和必要终端关联，允许已认证账号只读查询自己的记录；普通用户不能提交、修改 IP 或读取他人记录。
+
+登录来源由认证服务及已核验代理链确认，客户端自报 IP 或未清洗的转发头不作为事实。来源未知时保持未记录，不填写猜测地址或地点。首次登录、令牌续期和最近活动分别表达；退出或撤销终端不应抹掉已经保存的登录安全记录，保留和账号删除遵循现有账号数据规则。
+
+账号登录 IP、机器人接入云端的出口 IP、平台内部地址是不同事实，分别命名和授权。查看本人登录 IP 不授予云管理、远程运动控制或机器人采集许可，不自动开启机器人云连接；本功能不新增安全邮件或第三方 IP 定位。
+
 2026-11-08补充产品边界。以下是用户提出的数据责任要求及建议的实施原则，**不代表现有代码已经实现字段授权、员工隔离或售后限时访问**。下面的协议章节继续描述实际wire行为。
 
 DOSO负责产品能力、硬件本地保护和托管平台运行；客户决定自身业务规则、数据去向、通知对象和成员权限。提供告警引擎或模板，不赋予DOSO人员查看客户业务告警的默认权限。具体设备的低电量、故障、离线时间也可能反映客户业务，不能默认视为厂商运维数据。
@@ -534,3 +554,9 @@ user disable or ownership reset produces the corresponding new disabled decision
 and immediately prevents old report commits. Default-off, never-granted devices
 display "未开启"; pending-close is reserved for a previously issued collection
 permission whose stop has not been confirmed. The App never keeps this loop alive.
+
+### 登录 IP API 的源码与发布边界（2026-11-12）
+
+App 真源位于 `C:\Users\99563\Documents\ChatGPT\New project\doso-app`。登录 IP 已在源码中接入：迁移 `supabase/migrations/20261112020000_add_login_history.sql` 的 `capture_account_login` 从已验证的 `auth.sessions` 读取当前 `session_id` 对应的 `created_at` 与 `ip`，以幂等的 `account.login` 审计记录保存；`account-sessions` 的 `capture_login` 和 `list_login_history` 只允许当前认证账号使用。查询最多返回 50 条 `{id, loggedInAt, ipAddress, method}`，未知 IP 为 `null`，客户端不能提交 IP 或账号标识。完整字段与调用方式见 App [账号登录 IP 自查 API](<C:/Users/99563/Documents/ChatGPT/New project/doso-app/docs/production/DOSO_ACCOUNT_LOGIN_IP_API.md>)。
+
+本段源码和本地回归已完成，但迁移、匹配的 Edge Function、可信代理修正和真实账号登录读回尚未部署/验收。认证 IP 只有在反向代理覆盖伪造的 `X-Forwarded-For`、限制绕过入口并由 Auth 会话写入后才可作为可信来源；来源不明保持 `null`。账号登录 IP 永不代替 Broker 看到的机器人 MQTT socket peer，二者不共用字段、权限或查询接口。

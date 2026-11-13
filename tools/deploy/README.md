@@ -6,6 +6,8 @@ ECS `8.153.169.177` 的既有运行环境为Ubuntu 24.04 / x86_64，部署Mosqui
 
 狗端云连接服务源码已采用 `robot/` 和 `doso-cloud-link` 命名，新名 ARM64 离线候选包已生成并核对架构和内容；本机只读入口、真实设备自动同步和 App 端到端查询仍待验收。部署准备资料见 [LINK.md](LINK.md)：用户本地授权与关闭后完全断云尚未实现，不能按旧流程开启真机云连接。
 
+现场维护前先在机器狗上运行 [field-preflight.sh](field-preflight.sh)。它只读取 systemd、端口、IMU 和四路 CAN，并调用 `thunder-can-up.py --check`；不会启动服务、拉起 CAN 或修改配置。只有四路 CAN 都是 UP 且只读检查通过，才进入 Brainstem 候选维护窗口。
+
 2026-11-03的历史公网模拟查询记录见 [RESULT.md](RESULT.md)，当时Brainstem使用本机模拟服务。2026-11-07的实际Web App、真实业务数据库与模拟设备链路见[模拟设备记录](../../docs/SIMULATED_FLOW.md)；该轮使用隔离Gateway和SSH隧道，不等于真机或独立公网MQTT验收。最新进展见 [PROGRESS.md](../../PROGRESS.md)。
 
 设备库存、证书和签名身份的职责及当前缺口见 [IDENTITY.md](IDENTITY.md)。

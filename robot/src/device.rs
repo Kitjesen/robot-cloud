@@ -192,6 +192,39 @@ mod tests {
     }
 
     #[test]
+    fn cloud_motion_requests_are_rejected_before_read_admission() {
+        let (mut device, cloud, mut request) = fixture();
+        enable(&mut device, &cloud);
+        assert!(device.reporting.active().is_some());
+        for kind in [
+            "motion",
+            "teleop",
+            "enable_motors",
+            "/brainstem.api.v1.RobotControl/EnableMotors",
+            "status.get",
+        ] {
+            request.kind = kind.into();
+            let signed = encode_signed(&request, &cloud).unwrap();
+            assert!(device.accept(&signed, NOW).is_err(), "accepted {kind}");
+            assert!(device.seen.is_empty());
+        }
+        request.kind = "status.read".into();
+        for field in ["method", "arguments", "command"] {
+            let mut value = serde_json::to_value(&request).unwrap();
+            value[field] = serde_json::json!("/brainstem.api.v1.RobotControl/EnableMotors");
+            let signed = encode_signed(&value, &cloud).unwrap();
+            assert!(device.accept(&signed, NOW).is_err(), "accepted {field}");
+            assert!(device.seen.is_empty());
+        }
+        assert!(
+            device
+                .accept(&encode_signed(&request, &cloud).unwrap(), NOW)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn video_requires_signed_current_connection_without_status_permission() {
         let (mut device, cloud, _) = fixture();
         device.reporting.connect(NOW, Instant::now());

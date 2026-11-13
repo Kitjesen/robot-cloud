@@ -63,6 +63,28 @@ fn apply_environment(command: &mut Command, values: &BTreeMap<String, String>) {
         .envs(values);
 }
 
+async fn mqtt_output(mut command: Command, name: &str) -> Result<std::process::Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("run {name} MQTT check"))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            bail!("{name} MQTT check timed out");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(child.wait_with_output()?)
+}
+
 pub struct Process {
     child: Child,
     log: PathBuf,
@@ -379,22 +401,28 @@ impl Fixture {
         let openssl = executable("OPENSSL_BIN", "openssl")?;
         self.openssl(&openssl, &format!("req -x509 -newkey rsa:2048 -nodes -days 1 -keyout untrusted.key -out untrusted.pem -subj /CN={device}")).await?;
         let own = format!("doso/v1/devices/{device}/status/reports");
-        let other = format!("doso/v1/devices/{}/status/reports", uuid::Uuid::new_v4());
-        for (name, cert, key, topic, expected) in [
+        let other_id = uuid::Uuid::new_v4();
+        let other = format!("doso/v1/devices/{other_id}/status/reports");
+        let control = format!("doso/v1/devices/{device}/reporting/control");
+        let video = format!("doso/v1/devices/{device}/video/control");
+        let requests = format!("doso/v1/devices/{device}/status/requests");
+        for (name, cert, key, topic, expected, client_id) in [
             (
                 "valid",
                 Some(format!("{device}.pem")),
                 Some(format!("{device}.key")),
                 own.as_str(),
                 "allowed",
+                None,
             ),
-            ("no_certificate", None, None, own.as_str(), ""),
+            ("no_certificate", None, None, own.as_str(), "", None),
             (
                 "untrusted_certificate",
                 Some("untrusted.pem".into()),
                 Some("untrusted.key".into()),
                 own.as_str(),
                 "",
+                None,
             ),
             (
                 "other_device",
@@ -402,6 +430,39 @@ impl Fixture {
                 Some(format!("{device}.key")),
                 other.as_str(),
                 "denied",
+                None,
+            ),
+            (
+                "own_permission_write",
+                Some(format!("{device}.pem")),
+                Some(format!("{device}.key")),
+                control.as_str(),
+                "denied",
+                None,
+            ),
+            (
+                "own_video_control_write",
+                Some(format!("{device}.pem")),
+                Some(format!("{device}.key")),
+                video.as_str(),
+                "denied",
+                None,
+            ),
+            (
+                "own_status_request_write",
+                Some(format!("{device}.pem")),
+                Some(format!("{device}.key")),
+                requests.as_str(),
+                "denied",
+                None,
+            ),
+            (
+                "gateway_client_id",
+                Some(format!("{device}.pem")),
+                Some(format!("{device}.key")),
+                control.as_str(),
+                "denied",
+                Some("doso-gateway"),
             ),
         ] {
             let mut command = Command::new(&publisher);
@@ -424,25 +485,10 @@ impl Fixture {
                     .arg("--key")
                     .arg(self.path(&key));
             }
-            command.stdout(Stdio::piped()).stderr(Stdio::piped());
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                command.creation_flags(0x08000000);
+            if let Some(client_id) = client_id {
+                command.args(["-i", client_id]);
             }
-            let mut child = command
-                .spawn()
-                .with_context(|| format!("run {name} MQTT check"))?;
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while child.try_wait()?.is_none() {
-                if Instant::now() >= deadline {
-                    child.kill()?;
-                    child.wait()?;
-                    bail!("{name} MQTT check timed out");
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            let output = child.wait_with_output()?;
+            let output = mqtt_output(command, name).await?;
             let text = format!(
                 "{}{}",
                 String::from_utf8_lossy(&output.stdout),
@@ -469,6 +515,82 @@ impl Fixture {
             }
             println!("PASS MQTT {name}");
         }
+        let subscriber = broker.with_file_name(format!("mosquitto_sub{}", env::consts::EXE_SUFFIX));
+        ensure!(subscriber.is_file(), "missing {}", subscriber.display());
+        let other_control = format!("doso/v1/devices/{other_id}/reporting/control");
+        let mut command = Command::new(subscriber);
+        command
+            .args(["-h", "127.0.0.1", "-p", &port.to_string(), "-V", "mqttv5"])
+            .arg("--cafile")
+            .arg(self.path("ca.pem"))
+            .arg("--cert")
+            .arg(self.path(&format!("{device}.pem")))
+            .arg("--key")
+            .arg(self.path(&format!("{device}.key")))
+            .args([
+                "-q",
+                "1",
+                "-t",
+                &control,
+                "-t",
+                &other_control,
+                "-C",
+                "1",
+                "-W",
+                "4",
+                "-v",
+                "-d",
+            ]);
+        let broker_log = self.path("broker.log");
+        let previous = fs::read_to_string(&broker_log)?.len();
+        self.processes
+            .push(Process::spawn(command, self.path("read-acl.log"))?);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            self.check()?;
+            if fs::read_to_string(&broker_log)?[previous..]
+                .contains(&format!("Sending SUBACK to {device}"))
+            {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "read ACL subscription did not complete"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        for (topic, marker) in [
+            (other_control.as_str(), "forbidden-device-read"),
+            (control.as_str(), "allowed-device-read"),
+        ] {
+            let mut command = Command::new(&publisher);
+            command
+                .args(["-h", "127.0.0.1", "-p", &port.to_string(), "-V", "mqttv5"])
+                .arg("--cafile")
+                .arg(self.path("ca.pem"))
+                .arg("--cert")
+                .arg(self.path("doso-gateway.pem"))
+                .arg("--key")
+                .arg(self.path("doso-gateway.key"))
+                .args(["-q", "1", "-t", topic, "-m", marker, "-d"]);
+            let output = mqtt_output(command, "read_acl_gateway_publish").await?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            ensure!(
+                output.status.success() && (text.contains("RC:0)") || text.contains("RC:16)")),
+                "Gateway failed to publish ACL probe: {text}"
+            );
+        }
+        let subscriber = self.processes.last_mut().unwrap();
+        subscriber.wait_success().await?;
+        let received = subscriber.logs();
+        ensure!(
+            received.contains("received SUBACK")
+                && received.contains("allowed-device-read")
+                && !received.contains("forbidden-device-read"),
+            "device received unauthorized data: {received}"
+        );
+        self.processes.pop();
+        println!("PASS MQTT device_read_acl");
         Ok(())
     }
 

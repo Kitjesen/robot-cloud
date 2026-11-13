@@ -4,12 +4,14 @@
 
 ## 用户看到什么
 
-- 默认街道跟随视角；拖动、旋转或缩放后自由查看，点击“跟随机器狗”恢复。
-- “轨迹全览”显示所选日期的分段轨迹及起点、末端；“地球视角”用于查看区域。
-- 摘要显示 GPS 估算里程、有效记录时长、首次和末次定位时间。模拟数据始终标识为模拟。
+- 默认街道跟随视角；拖动、旋转或缩放后自由查看，点击“跟随”恢复。
+- “跟随/全览/地球”位于地图上方独立工具栏，不覆盖绘图区；起点和末次记录用小点标识，靠近时避免重叠。
+- 下方摘要支持上拉展开、下拉收起和点击/键盘切换。收起时保留GPS估算里程、有效记录时长和重要提示；展开滚动查看首次/末次定位和完整说明。模拟数据始终标识为模拟。
 - 定位失效时暂停自动跟随。轨迹中断、异常跳点和许可切换处不连线；历史日期不叠加今日实时位置。
 - 默认今日，可查看前一天、后一天。跨午夜时仅“今日”自动切日，手动选择的历史日保持。
 - 暂时未同步或记录不完整以用户文案提示，不要求用户理解队列、映射或服务密钥。
+
+11月9日UI改版参考Inspora上Divan Raj的 [sleep-tracking dashboard UI](https://www.inspora.design/posts/sleep-tracking-dashboard-ui)：白色单卡、紧凑日期、并排核心数字；保留DOSO天蓝色与深色主题。按后续截图反馈，摘要改为滑动卡片，移除起末点常驻文字，工具栏移出地图；自有控件统一使用AppText/MiSans，里程和时长统一字号、行高和字重。底图地名字体由地图服务提供。初版参考记录见 [20261109-ui](D:/DOSO/artifacts/robot-cloud/20261109-ui)，滑动版记录见 [20261109-track-sheet](D:/DOSO/artifacts/robot-cloud/20261109-track-sheet)。正式安装包另行发布。
 
 ## 一份历史，一个归属
 
@@ -33,13 +35,15 @@ PostgreSQL 的 outbox 仅负责可靠投递；长期轨迹从 ThingsBoard 原始
 | --- | --- |
 | 地图相机、轨迹线与标记 | [locationMapHtml.ts](<C:/Users/99563/Documents/ChatGPT/New project/doso-app/src/components/locationMapHtml.ts>) |
 | 日期、地图和摘要卡 | [TrackPanel.tsx](<C:/Users/99563/Documents/ChatGPT/New project/doso-app/src/components/TrackPanel.tsx>) |
+| 摘要高度、拖动和吸附 | [TrackSheet.tsx](<C:/Users/99563/Documents/ChatGPT/New project/doso-app/src/components/TrackSheet.tsx>) |
+| 地图外部按钮与状态 | [MapBar.tsx](<C:/Users/99563/Documents/ChatGPT/New project/doso-app/src/components/MapBar.tsx>) |
 | 去重、断段和估算 | [track.ts](<C:/Users/99563/Documents/ChatGPT/New project/doso-app/src/features/location/track.ts>) |
 | App 历史请求与分页 | [remoteHistory.ts](<C:/Users/99563/Documents/ChatGPT/New project/doso-app/src/services/remoteHistory.ts>) |
 | 业务历史接口与合同 | [handler.ts](<C:/Users/99563/Documents/ChatGPT/New project/doso-app/supabase/functions/remote-history/handler.ts>)、[API 合同](<C:/Users/99563/Documents/ChatGPT/New project/doso-app/docs/production/DOSO_REMOTE_HISTORY_API.md>) |
 | Rust 历史投递 | [cloud/telemetry](../cloud/telemetry/README.md) |
 | 连续模拟路线 | [uplink.rs](../tools/lab/src/uplink.rs) |
 
-App 只在前台展开地图时每 10 秒读取历史，最新状态仍沿用原查询。每页 500 条，上限 2000 条；超限显示“部分记录”，里程和时长只统计显示部分。该上限是本次边界，长时间全天轨迹还需服务端降采样或分时段查询。
+App 只在前台展开地图时每 10 秒读取历史，最新状态仍沿用原查询。每页500条，按时间升序读取，上限2000条；卡片以实际“记录时段”标明里程和时长范围，不显示截断条数文案。该上限仍存在，当前不能把已读时段称为全天或最新历史；长时间全天轨迹还需服务端降采样或分时段查询。
 
 里程按有效点的距离估算，位移门槛取 3 米与已知精度的较大值；有效时长只累计连续定位覆盖。重复 fix 不重复累计，15 秒以上间隔和超过 15 m/s 的跳点断段。这些是当前低速机器人展示规则，不能替代轮式里程计、任务运行时间或真实 GNSS 标定。
 

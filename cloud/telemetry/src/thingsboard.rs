@@ -214,6 +214,7 @@ pub fn projection(item: &Item) -> Result<Value> {
         "reportingSessionId": report.reporting_session_id, "seq": report.seq,
         "observedAt": report.observed_at, "receivedAt": item.received.received_at,
         "sourceReport": serde_json::to_string(&item.received.report)?,
+        "locationAvailable": false, "locationAccuracyAvailable": false,
     });
     match (&report.status, &report.error) {
         (Some(status), None) => {
@@ -226,6 +227,17 @@ pub fn projection(item: &Item) -> Result<Value> {
             values["motorOutputEnabled"] = json!(status.control.motor_output_enabled);
             values["criticalMotorFault"] = json!(status.control.critical_motor_fault);
             values["transport"] = json!(status.transport);
+            if let Some(location) = &status.location {
+                values["locationAvailable"] = json!(true);
+                values["latitude"] = json!(location.lat);
+                values["longitude"] = json!(location.lon);
+                values["locationObservedAt"] = json!(location.observed_at);
+                values["locationFixType"] = json!(location.fix_type);
+                if let Some(accuracy) = location.accuracy_m {
+                    values["locationAccuracyAvailable"] = json!(true);
+                    values["locationAccuracyM"] = json!(accuracy);
+                }
+            }
         }
         (None, Some(error)) if error == "upstream_unavailable" => {
             values["sampleOk"] = json!(false);

@@ -14,3 +14,8 @@ Copyright © 2020-2025 Beijing Xiaomi Mobile Software Co.,Ltd. All Rights Reserv
 The original MiSans Font Intellectual Property License Agreement is bundled at
 /assets/fonts/MiSans-License.pdf and is accessible from the user menu.
 The bundled Regular, Medium, Demibold and Bold font files are unmodified.
+
+Navigation icons use unmodified Lucide SVG artwork.
+https://github.com/lucide-icons/lucide
+The complete ISC license and Feather MIT attribution are bundled at
+/assets/icons/lucide/LICENSE.

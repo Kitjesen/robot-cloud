@@ -2,6 +2,24 @@
 
 更新：2026-11-08。当前源码目录为 `robot/`、`cloud/`、`shared/`、`tools/`；包名和目标二进制名沿用原合同。11月8日新增遥测程序Linux候选如下；其他候选包、ABI和安装记录仍属于各自标明的历史构建，当前源码与线上制品是否一致须核对具体制品。
 
+## 当前 ARM64 云连接候选（2026-11-12）
+
+已用当前工作区源码重新构建 `doso-cloud-link`，目标为 `aarch64-unknown-linux-gnu.2.35`。候选包位于
+`D:\DOSO\artifacts\robot-cloud\releases\20261112-cloud-link-aarch64\link-aarch64.tar.gz`，包内默认保持
+`DOSO_CLOUD_ON=false`，不包含设备私钥。
+
+| 项目 | 值 |
+| --- | --- |
+| ARM64 ELF | 4,473,832 bytes，AArch64 |
+| 最高 GLIBC | `GLIBC_2.34` |
+| 二进制 SHA256 | `d9fe0504b0c4fab27236e31a6171a6947cf85eece8125a69730e2e602b826d85` |
+| 包 SHA256 | `b3c4fd2cfa796f5233942a84c392ab723bd6cc00286eaa2de8cee0f78699ea36` |
+| Cargo.lock SHA256 | `86daa7df13755cf8df3db69420eee5e9a44c0f3297b2dbe9df0664c0c048d547` |
+| 狗端测试 | 24 passed + 2 startup passed，1 ignored |
+| 真机状态 | 未安装；目标机当前不可达 |
+
+该候选只证明当前源码可以生成可交付的 ARM64 包，不证明目标机 Brainstem `127.0.0.1:13146` 已发布、SSH 可达、证书/UUID/ACL 已配置或真实云状态已接通。安装前仍必须先核对 Brainstem 只读入口，再按 [LINK.md](tools/deploy/LINK.md) 保持云连接关闭完成安装。
+
 ## 遥测投递候选（2026-11-08）
 
 `doso-cloud-telemetry` 已用锁定依赖和单任务交叉构建生成 x86_64 Linux ELF，构建目标 `x86_64-unknown-linux-gnu.2.35`。二进制3,952,040字节，SHA256为 `bf33aad933e3d20f8e54091edbe99aff8363ecbe10bd2473d80b2f1fb16d2b7c`。真实Linux容器中ldd解析成功、缺失配置时以1退出并报固定错误，未运行目标机systemd或生产投递。[Linux检查](D:/DOSO/artifacts/robot-cloud/telemetry-20261108/linux-smoke.json)

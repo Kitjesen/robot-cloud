@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -160,11 +160,19 @@ impl Gateway {
         if !device.enabled {
             return Err(Error::Disabled);
         }
+        let key_path = Path::new(&device.public_key_path);
+        if key_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+            || key_path.as_os_str().is_empty()
+        {
+            return Err(Error::Unavailable);
+        }
         let path = self
             .registry_path
             .parent()
             .unwrap_or(Path::new("."))
-            .join(&device.public_key_path);
+            .join(key_path);
         load_verifying_key(path.to_str().ok_or(Error::Unavailable)?).map_err(|_| Error::Unavailable)
     }
 

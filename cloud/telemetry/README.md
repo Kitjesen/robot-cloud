@@ -2,6 +2,8 @@
 
 本目录的 Rust 程序运行在云服务器，接收 DOSO 业务数据库已接受的状态记录，投递到 ThingsBoard。客户仍使用 DOSO App 和 Rust SDK；设备归属、用户许可及当前状态继续由现有业务后端管理。源码与数据库改动的整体范围见 [迁移方案](../../docs/MIGRATION.md)。
 
+2026-11-11 源码新增已接受位置的 `latitude`、`longitude`、`locationObservedAt`、`locationFixType` 和可选 `locationAccuracyM`，每条明确写 `locationAvailable`、`locationAccuracyAvailable`。TB latest 会保留省略的旧 key，地图/规则须结合对应可用位及源时间判断，不能只读坐标。字段与后续连接 IP/告警边界见 [机器人云端管理](../../docs/MONITORING.md)。本轮投影补充不表示云端 worker 已部署、真实位置已接通或规则已触发。
+
 客户数据与告警责任见 [产品合同](../../CONTRACT.md#客户数据与告警责任)。当前完整`sourceReport`可能含位置，单一实验租户和技术管理员只完成模拟接入；数据类别许可、DOSO人员默认禁读及售后限时访问尚未实现。真实客户接入需先落实所选隐私边界；现有总开关与运维出口开关不代表这些细分授权。
 
 `deploy/` 提供独立开发用 ThingsBoard 4.3.1.8 和 PostgreSQL 18.1 配置。两个镜像摘要于 2026-11-08 直接从 Docker Registry 核对并固定；仅 HTTP 映射到 `127.0.0.1:18080`，数据库不映射宿主端口，MQTT、CoAP 等传输关闭。该配置不连接现有 DOSO 数据库。

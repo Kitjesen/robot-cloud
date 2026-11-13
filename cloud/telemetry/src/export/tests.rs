@@ -43,6 +43,13 @@ fn keeps_source_time_and_complete_report_without_lease_expiry_check() {
     assert_eq!(value["values"]["stateKind"], "CMS_STATE_KIND_GROUNDED");
     assert_eq!(value["values"]["sampleOk"], true);
     assert_eq!(value["values"]["readError"], "");
+    assert_eq!(value["values"]["locationAvailable"], true);
+    assert_eq!(value["values"]["latitude"], 31.2);
+    assert_eq!(value["values"]["longitude"], 121.4);
+    assert_eq!(value["values"]["locationObservedAt"], OBSERVED);
+    assert_eq!(value["values"]["locationFixType"], 1);
+    assert_eq!(value["values"]["locationAccuracyAvailable"], false);
+    assert!(value["values"].get("locationAccuracyM").is_none());
     let source: Value =
         serde_json::from_str(value["values"]["sourceReport"].as_str().unwrap()).unwrap();
     assert_eq!(source, original["received"]["report"]);
@@ -55,13 +62,71 @@ fn failed_sample_has_no_fabricated_status() {
     let value = projection(&record).unwrap();
     assert_eq!(value["values"]["sampleOk"], false);
     assert_eq!(value["values"]["readError"], "upstream_unavailable");
+    assert_eq!(value["values"]["locationAvailable"], false);
+    assert_eq!(value["values"]["locationAccuracyAvailable"], false);
     for key in [
         "stateKind",
         "controlOwner",
         "motorOutputEnabled",
         "criticalMotorFault",
+        "latitude",
+        "longitude",
+        "locationObservedAt",
+        "locationFixType",
+        "locationAccuracyM",
     ] {
         assert!(value["values"].get(key).is_none());
+    }
+}
+
+#[test]
+fn location_flags_gate_previous_coordinates_and_accuracy() {
+    let mut source = item(false);
+    let fix_time = "2026-11-03T11:59:59.000Z";
+    source["received"]["report"]["status"]["location"]["observedAt"] = json!(fix_time);
+    source["received"]["report"]["status"]["location"]["accuracyM"] = json!(2.5);
+    let record: Item = serde_json::from_value(source.clone()).unwrap();
+    let with_accuracy = projection(&record).unwrap();
+    assert_eq!(with_accuracy["values"]["locationAvailable"], true);
+    assert_eq!(with_accuracy["values"]["locationAccuracyAvailable"], true);
+    assert_eq!(with_accuracy["values"]["locationAccuracyM"], 2.5);
+    assert_eq!(with_accuracy["values"]["locationObservedAt"], fix_time);
+    assert_eq!(with_accuracy["values"]["observedAt"], OBSERVED);
+
+    source["received"]["report"]["status"]["location"]["accuracyM"] = Value::Null;
+    let record: Item = serde_json::from_value(source.clone()).unwrap();
+    let without_accuracy = projection(&record).unwrap();
+    assert_eq!(without_accuracy["values"]["locationAvailable"], true);
+    assert_eq!(
+        without_accuracy["values"]["locationAccuracyAvailable"],
+        false
+    );
+    assert!(
+        without_accuracy["values"]
+            .get("locationAccuracyM")
+            .is_none()
+    );
+
+    source["received"]["report"]["status"]
+        .as_object_mut()
+        .unwrap()
+        .remove("location");
+    let record: Item = serde_json::from_value(source).unwrap();
+    let without_location = projection(&record).unwrap();
+    assert_eq!(without_location["values"]["sampleOk"], true);
+    assert_eq!(without_location["values"]["locationAvailable"], false);
+    assert_eq!(
+        without_location["values"]["locationAccuracyAvailable"],
+        false
+    );
+    for key in [
+        "latitude",
+        "longitude",
+        "locationObservedAt",
+        "locationFixType",
+        "locationAccuracyM",
+    ] {
+        assert!(without_location["values"].get(key).is_none());
     }
 }
 

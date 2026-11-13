@@ -1,6 +1,6 @@
 # 机器狗云连接
 
-文档核对：2026-11-09。功能状态和下一阶段统一见 [PROGRESS.md](PROGRESS.md)，测试范围见 [TESTING.md](TESTING.md)；核对日期不代表重新部署或真机验收。
+文档核对：2026-11-13。功能状态和下一阶段统一见 [PROGRESS.md](PROGRESS.md)，测试范围见 [TESTING.md](TESTING.md)；本轮真实交付证据见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。核对日期不代表重新部署或真机验收。
 
 独立 Rust 工程位于 `D:\DOSO\robot-cloud`，源码按运行位置组织：`robot/` 运行在机器狗 Linux 主机，`cloud/` 部署到云服务器，`shared/` 编译进两端，`tools/` 放开发联调与部署工具。
 
