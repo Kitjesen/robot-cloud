@@ -1,6 +1,6 @@
 # 云端系统：当前进度与产品推进
 
-**2026-11-13 本轮交付记录：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。Rust SDK 124 项、robot-cloud 工作区 84 项通过且 1 项 ignored，格式与 Clippy 通过；本机模拟云链路和 MQTT ACL 检查通过，远程关闭持久化和本地重新开启已补齐。现场 G1 窗口在候选启动前曾暴露 `usbbus2 errno=6`、`can1` USB 断开和 CAN link DOWN，旧服务停止超时并进入 failed；随后只读复核已看到 Brainstem active、四路 CAN UP，但物理 USB/逻辑总线映射仍不匹配，`13146` 尚未验收。公网 MQTT TLS 已通，真实 Gateway 仍对研发 UUID 返回 `403 disabled`；ECS 登记仍未完成，不能写成真实云状态已交付。
+**2026-11-13 本轮交付记录：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。Rust SDK 124 项、robot-cloud 工作区 84 项通过且 1 项 ignored，格式与 Clippy 通过；本机模拟云链路和 MQTT ACL 检查通过，远程关闭持久化和本地重新开启已补齐。现场 G1 窗口在候选启动前曾暴露 `usbbus2 errno=6`、`can1` USB 断开和 CAN link DOWN，旧服务停止超时并进入 failed；随后当前 flowfix11 的映射检查恢复，`127.0.0.1:13146` 已真实读通。公网 MQTT TLS 已通，真实 Gateway 仍对研发 UUID 返回 `403 disabled`；ECS 登记仍未完成，不能写成真实云状态已交付。
 
 **11:36 CST 只读复核：** 现场状态没有自行恢复：`brainstem.service=failed`、`13145/13146/5052` 无监听、`doso-cloud-link` inactive，`can0/2/3` UP 而 `can1` DOWN/STOPPED。没有执行 start/stop 或 CAN 配置。[复核证据](artifacts/robot-cloud/real-connect-20261113/field-recheck-20261113T113631Z.json)
 
@@ -9,6 +9,8 @@
 **21:29 CST 最新只读复核：** `brainstem.service` 已 active，`13145` 可达，四路 CAN 均 UP/ERROR-ACTIVE/1 Mbps，IMU 存在；`13146`、cloud-link 和 grpc proxy 仍未运行。预检仍退出 1，因为 `can0→USB 1-1.1` 与既有脚本要求的 `can0→USB 1-2` 不一致；未执行 CAN 配置或服务动作。[最新原件](artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json)
 
 **用户确认 CAN 恢复后的只读复核：** 当前 Brainstem 为 `flowfix11_prone_20261113_70e3b574`、PID 86758，13145 active；四路 CAN 均 UP，但既有 ROUTES 检查仍拒绝 `can0→USB 1-1.1`。没有切换当前 Brainstem、修改 CAN 或启动 13146。[复核原件](artifacts/robot-cloud/real-connect-20261113/failure-inspection.json)
+
+**22:55 CST 当前只读复核：** flowfix11 的实际映射脚本已按当前 USB 拓扑通过，四路 CAN 为 UP/ERROR-ACTIVE/1 Mbps，`127.0.0.1:13146` 已监听；机器狗本机 `GetControlStatus` 读回 GROUNDED、输出关闭、控制方 NONE、无关键故障。新 ARM64 cloud-link 候选已安装但保持 `DOSO_CLOUD_ON=false`，未连接云端。[preflight](artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json) · [13146 读取](artifacts/robot-cloud/real-connect-20261113/read-current-13146.json) · [cloud-link 安装](artifacts/robot-cloud/real-connect-20261113/cloud-link-install.json)
 
 更新：2026-11-12。本页是当前完成程度、缺口和推进顺序的汇总入口；协议见 [CONTRACT.md](CONTRACT.md)，测试命令与证据边界见 [TESTING.md](TESTING.md)。各条记录区分源码、实际部署与真机证据。
 
@@ -48,7 +50,7 @@
 | 云端基础服务 | 业务API、Gateway自动同步、Mosquitto和HTTPS有11月4日部署记录 | 当前正式制品与最新源码是否一致需核对；部署记录不等于今天的在线检查 |
 | 真实Web App与业务数据库 | 11月7日已登记模拟设备，用正常账号完成绑定API、开启、退出页面更新、断网恢复、关闭停采 | 真实机器狗、正式手机/G20、手机扫码、独立公网MQTT和5G待验收 |
 | GNSS位置与轨迹地图 | 11月9日新增街道跟随、自由查看、分段轨迹全览、日期与摘要卡；实际Web App已从真实HTTPS接口读回模拟轨迹并验证刷新保留；[实现与范围](docs/TRACKS.md) | 真实GNSS硬件、机端部署、原生手机和国内底图长期可达性待验收；长时间历史目前最多展示2000条 |
-| 机器狗云连接程序 | cloud-link真实服务用户关闭态已验证；新远程关闭持久化候选已生成 ARM64 包；真实UUID与机端独立TLS/状态签名密钥已准备，云保持关闭 | device.crt未签发安装、Gateway公钥/ACL未登记；13146/正式5052未监听、Host修复尚未部署；候选尚未安装，完整真实上云仍待验收 |
+| 机器狗云连接程序 | 新远程关闭持久化 ARM64 候选已安装并以关闭态验证；真实 13146 已读通；真实 UUID 与机端独立 TLS/状态签名密钥已准备 | Gateway 公钥/ACL 未登记，云连接保持关闭；真实 MQTT 上报和 App 状态仍待验收 |
 | 用户主动关闭云连接 | 本地关闭、重启保持关闭、远程 `enabled=false` 持久化 `choice=false`、停止采样并退出 MQTT 已在模拟 mTLS 链路验证 | 真机远程关闭、真实服务用户权限和 App 端到端仍待验收 |
 | 设备身份与归属 | 用户选定THUNDER-DEV-001，真实库存UUID已登记并写入机端；非demo/非模拟、未认领，TLS CSR与独立状态签名密钥已准备 | 客户认领、制造证明密钥、证书签发安装、云侧公钥/ACL与上云验收未完成；已有状态签名密钥不能当制造认领密钥 |
 | 视频 | 观看授权有11月6日部署记录；media/MediaMTX与模拟源已有验证 | 媒体候选部署、真实摄像头、正式App观看及公网连接待验收 |

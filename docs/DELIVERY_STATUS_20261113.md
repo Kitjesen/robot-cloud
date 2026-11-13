@@ -24,9 +24,13 @@
 
 本轮新增的远程关闭回归已通过：[local-remote-close-check.log](../artifacts/robot-cloud/real-connect-20261113/local-remote-close-check.log)。模拟设备收到签名 `enabled=false` 后原子保存 `choice=false`、停止采样并退出 cloud-link；重启保持 `cloud_off`，本地 `choice=true` 配合新许可后恢复上报。普通许可到期保持本地选择不变。
 
-最新只读现场复核（2026-11-13 21:29 CST）：`brainstem.service` 已恢复 active，`13145` 可达；`doso-cloud-link` 和 `brainstem-grpc-proxy` 仍 inactive，`13146` 未监听；`can0`–`can3` 均为 UP、ERROR-ACTIVE、1 Mbps，IMU 设备存在。预检仍以退出码 1 拒绝继续，原因是现有映射脚本要求 `can0 → USB 1-2`，实际观察为 `can0 → USB 1-1.1`、`can1 → USB 1-2.1`。没有执行 `ip link set`、服务启停或 CAN 配置。[最新原件](../artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json)
+历史只读现场复核（2026-11-13 21:29 CST，映射脚本更新前）：`brainstem.service` 已恢复 active，`13145` 可达；`doso-cloud-link` 和 `brainstem-grpc-proxy` 仍 inactive，`13146` 未监听；`can0`–`can3` 均为 UP、ERROR-ACTIVE、1 Mbps，IMU 设备存在。预检以退出码 1 拒绝继续，原因是旧脚本要求 `can0 → USB 1-2`，实际观察为 `can0 → USB 1-1.1`、`can1 → USB 1-2.1`。没有执行 `ip link set`、服务启停或 CAN 配置。[历史原件](../artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json)
 
-用户随后确认 CAN 已恢复；新的只读检查显示当前 `brainstem.service` 实际运行 `/home/sunrise/deployments/thunder_dual56501_flowfix11_prone_20261113_70e3b574/bundle/bin/thunder`，PID 86758，`13145` active，`13146` 仍未监听，cloud-link 和 grpc proxy 仍 inactive。四路 CAN 仍是 UP/ERROR-ACTIVE/1 Mbps，但 `thunder-can-up.py --check` 继续因 `can0` USB parent 不符合既有 ROUTES 而退出 1；没有改映射或切换当前 flowfix11。[最新只读复核](../artifacts/robot-cloud/real-connect-20261113/failure-inspection.json)
+历史复核（flowfix11 切换前）：用户随后确认 CAN 已恢复；当时 `brainstem.service` 实际运行 flowfix11，`13145` active，`13146` 尚未监听，cloud-link 和 grpc proxy 仍 inactive。之后当前映射脚本已按实际拓扑恢复，未改动 CAN 或运动配置。[历史原件](../artifacts/robot-cloud/real-connect-20261113/failure-inspection.json)
+
+随后 flowfix11 的当前映射脚本已按实际拓扑恢复，新的只读 preflight 退出 0：`thunder-can.service` active/exited，`127.0.0.1:13146` 正在监听，四路 CAN 均 UP/ERROR-ACTIVE/1 Mbps。[最新 preflight](../artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json)
+
+通过机器狗上的只读 Dart 客户端调用 `127.0.0.1:13146/GetControlStatus` 成功，读回 CMS GROUNDED、输出关闭、控制方 NONE、关键故障 false、gRPC lease inactive；没有调用控制 RPC。[原件](../artifacts/robot-cloud/real-connect-20261113/read-current-13146.json)
 
 随后通过现有 LAN 主控制端口 `192.168.66.64:13145` 做了六个明确的只读 RPC：`GetControlStatus`、`GetProfile`、`GetCmsState`、`GetMotorStatus`、`GetParams` 成功，`GetVoltage` 因源码核对条件不满足而跳过。当前读回 CMS ZERO、输出关闭、控制方 NONE、关键故障 false、16/16 电机 online、无状态码/错误，当前 profile 为 `all_elbow`；这证明主端口读状态正常，不等于 `13146` 只读桥已部署，也不等于物理禁用确认。[只读原件](../artifacts/robot-cloud/sdk-field-20261112/current-read-api-20261112-native-owner.json)
 
@@ -36,7 +40,11 @@
 
 ### G1：本机只读源
 
-当前 `brainstem.service` 已恢复 `flowfix10`，`13145` active；`13146` 没有监听。合并候选曾经成功绑定 `127.0.0.1:13146`，但停止时进入既有物理电机禁用确认流程并超时，因此没有安装为正式版本。候选的离线预检通过不等于真机生命周期通过。最新现场四路 CAN 已重新为 UP，但物理角色映射仍未确认，不能进入候选维护。
+当前 `brainstem.service` 运行 `flowfix11_prone_20261113_70e3b574`，`13145` active，`127.0.0.1:13146` 已监听。四路 CAN 的当前实际映射通过只读检查，`GetControlStatus` 已真实读通；当前已完成本机只读源验收。尚未对 flowfix11 做停止/回滚生命周期窗口，不能把旧 flowfix10 候选的关闭竞态修复写成已部署。[本机只读原件](../artifacts/robot-cloud/real-connect-20261113/read-current-13146.json)
+
+### G2：机器狗 cloud-link
+
+新 ARM64 候选已安装到 `/opt/doso/bin/doso-cloud-link`，旧版本备份为 `/opt/doso/bin/doso-cloud-link.before-remote-close-20261113T145748Z`。安装后服务仍 inactive/disabled，关闭态运行退出 0、输出 `cloud_off`，候选 SHA-256 为 `15a1603fcd3af3feba71d3481e91f481011bfce0b80f141df6015517dd7bea76`。[安装原件](../artifacts/robot-cloud/real-connect-20261113/cloud-link-install.json)
 
 ### G3：云端设备登记
 

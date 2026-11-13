@@ -18,6 +18,14 @@
 
 同一现场窗口通过 `192.168.66.64:13145` 完成六个显式只读 RPC，其中五个成功：CMS ZERO、输出关闭、控制方 NONE、关键故障 false、16/16 电机 online、无状态码/错误、profile 为 `all_elbow`；`GetVoltage` 按源码核对条件跳过。该结果只证明现有主端口读状态正常，不替代 13146 验收或物理禁用确认。[原件](D:/DOSO/artifacts/robot-cloud/sdk-field-20261112/current-read-api-20261112-native-owner.json)
 
+## 当前 flowfix11 的 13146 与 cloud-link 候选（2026-11-13）
+
+现场最新只读 preflight 通过：`thunder-can.service` active/exited，四路 CAN 均 UP/ERROR-ACTIVE/1 Mbps，`127.0.0.1:13146` 监听。[原件](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json)
+
+通过机器狗上的 staging Dart 客户端调用 `127.0.0.1:13146/GetControlStatus` 成功，读回 CMS GROUNDED、`motorOutputEnabled=false`、owner NONE、critical fault false、lease inactive；没有调用控制 RPC。[原件](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/read-current-13146.json)
+
+新的 ARM64 `doso-cloud-link` 已安装但保持关闭：旧二进制哈希 `d9fe0504...b826d85` 已备份，新二进制哈希 `15a1603f...d7bea76` 与候选一致；以服务用户运行 `DOSO_CLOUD_ON=false` 输出 `cloud_off`，服务未启动、云开关未打开、没有运动命令。[原件](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-link-install.json)
+
 ## G1 关闭竞态候选（2026-11-13）
 
 定位到上一候选的具体竞态：关闭流程在 `Control disposed` 等迟到的输出撤销回调中再次启动 `joint.disable()`，而主关闭流程已经进入资源释放，导致物理禁用确认日志之后仍可能卡在 systemd 停止超时。修复在运行时开始关闭时设置一次性关闭闸门，并移除重复的关闭前 `invalidate`；关闭期间的迟到回调不再启动新的禁用操作，主关闭流程仍先等待现有物理禁用确认。
