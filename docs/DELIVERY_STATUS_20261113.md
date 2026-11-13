@@ -50,6 +50,8 @@
 
 真实设备签名公钥和六条精确 MQTT ACL 已通过阿里云 ECS 云助手写入 MQTT ECS `8.153.169.177`，设备登记为 `enabled=false`；Mosquitto 配置检查通过，Mosquitto 与 Gateway 均 active。SSH `22` 仍保持安全组拦截，未新增入口；云助手登记证据见 [cloud-assistant-registration-20261114.json](../artifacts/robot-cloud/real-connect-20261113/cloud-assistant-registration-20261114.json)。这一步只完成云端库存、签名公钥和 ACL 登记，不代表机器狗云连接已开启。
 
+本地授权入口已部署到机器狗：`doso-robot-authorizer.service` 监听 `127.0.0.1:13148`，通过受保护 Bearer token 原子写入 choice，并固定调用 `systemctl start|stop doso-cloud-link.service`；安装 gate 为 `DOSO_CLOUD_ON=true`，choice 初始仍为 `false`。部署后机器狗网络暂时不可达，尚未执行授权开启或真实 MQTT 上报验收。[authorizer 部署证据](../artifacts/robot-cloud/real-connect-20261113/authorizer-deploy-20261114.json)
+
 恢复受控入口后，执行顺序固定为：
 
 1. 备份线上 `devices.json` 和 `acl.conf`；

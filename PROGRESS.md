@@ -14,6 +14,8 @@
 
 **云端入口复核：** 当前开发机公网 IP 为 `96.44.160.185`，MQTT ECS `8.153.169.177:22` 仍不可达；业务 ECS 到 MQTT ECS 的 22 也被拦截。已改用已登录的阿里云 ECS 云助手完成受控登记，不改安全组、不开放 SSH；设备登记保持 `enabled=false`，Mosquitto 配置检查通过，Mosquitto 与 Gateway 均 active。[入口探测](artifacts/robot-cloud/real-connect-20261113/cloud-ssh-preflight-current.json) · [云助手登记证据](artifacts/robot-cloud/real-connect-20261113/cloud-assistant-registration-20261114.json)
 
+**本地授权入口部署：** 真实机器狗已安装 `doso-robot-authorizer.service`，监听 `127.0.0.1:13148`，Bearer token 校验通过，安装 gate 已切换为 `DOSO_CLOUD_ON=true`，choice 仍为 `false`，cloud-link 保持 inactive/disabled。授权调用开始前机器狗从局域网消失（无 ARP、ping、TCP 22），因此尚未声称 MQTT hello/status 已发送。[部署证据](artifacts/robot-cloud/real-connect-20261113/authorizer-deploy-20261114.json)
+
 更新：2026-11-12。本页是当前完成程度、缺口和推进顺序的汇总入口；协议见 [CONTRACT.md](CONTRACT.md)，测试命令与证据边界见 [TESTING.md](TESTING.md)。各条记录区分源码、实际部署与真机证据。
 
 ## 当前完成程度
