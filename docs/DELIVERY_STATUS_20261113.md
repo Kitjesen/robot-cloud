@@ -9,7 +9,7 @@
 | 范围 | 结果 | 说明 |
 | --- | --- | --- |
 | DOSO Rust SDK | 124 项通过 | 8 个库测试、103 个 gRPC/API 测试、2 个消息格式测试、11 个文档测试；工作区 `D:\inovxio\brain\DOSO-SDK` 的 `rust` 分支 |
-| robot-cloud Rust 工作区 | 83 通过，1 ignored | `cargo test --workspace --locked --offline -j 1`；没有失败；新增登记公钥路径越界回归 |
+| robot-cloud Rust 工作区 | 84 通过，1 ignored | `cargo test --workspace --locked --offline -j 1`；没有失败；包含远程关闭持久化回归 |
 | 格式与静态检查 | 通过 | `cargo fmt --all -- --check`、workspace Clippy `-D warnings` |
 | 本机模拟云链路 | 通过 | `lab check`：许可、签名状态、状态变化、读失败保留旧时间、关闭、过期、重连、视频、本地关闭持久化 |
 | 本机 MQTT 权限 | 9 项通过 | `lab auth-check`：合法证书、无证书、不受信、跨设备、设备控制主题越权和 Gateway 身份检查 |
@@ -21,6 +21,8 @@
 本轮没有发送运动命令、没有使能电机、没有修改 CAN，也没有重启机器狗服务。
 
 本轮新增的离线登记工具测试：`python -m unittest tools/deploy/test_render_device_registration.py -v`，3 项通过。它只生成待审查片段，不能代替 ECS 备份、`mosquitto --test-config`、reload 和真实 Gateway 查询。
+
+本轮新增的远程关闭回归已通过：[local-remote-close-check.log](../artifacts/robot-cloud/real-connect-20261113/local-remote-close-check.log)。模拟设备收到签名 `enabled=false` 后原子保存 `choice=false`、停止采样并退出 cloud-link；重启保持 `cloud_off`，本地 `choice=true` 配合新许可后恢复上报。普通许可到期保持本地选择不变。
 
 最新只读现场复核（2026-11-13 21:29 CST）：`brainstem.service` 已恢复 active，`13145` 可达；`doso-cloud-link` 和 `brainstem-grpc-proxy` 仍 inactive，`13146` 未监听；`can0`–`can3` 均为 UP、ERROR-ACTIVE、1 Mbps，IMU 设备存在。预检仍以退出码 1 拒绝继续，原因是现有映射脚本要求 `can0 → USB 1-2`，实际观察为 `can0 → USB 1-1.1`、`can1 → USB 1-2.1`。没有执行 `ip link set`、服务启停或 CAN 配置。[最新原件](../artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json)
 
