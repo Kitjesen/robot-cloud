@@ -48,7 +48,7 @@
 
 ### G3：云端设备登记
 
-真实设备签名公钥和六条精确 MQTT ACL 已准备在 [real-connect-20261113/cloud-patch](../artifacts/robot-cloud/real-connect-20261113/cloud-patch/)。最新开发机公网 IP 为 `96.44.160.185`，MQTT ECS `8.153.169.177:22` 仍被安全组拦截；业务 ECS 可登录但到 MQTT ECS 的 `22` 也被拦截，不能当跳板。当前不能安全地修改线上 `devices.json` 或 `acl.conf`。[最新探测](../artifacts/robot-cloud/real-connect-20261113/cloud-ssh-preflight-current.json)
+真实设备签名公钥和六条精确 MQTT ACL 已通过阿里云 ECS 云助手写入 MQTT ECS `8.153.169.177`，设备登记为 `enabled=false`；Mosquitto 配置检查通过，Mosquitto 与 Gateway 均 active。SSH `22` 仍保持安全组拦截，未新增入口；云助手登记证据见 [cloud-assistant-registration-20261114.json](../artifacts/robot-cloud/real-connect-20261113/cloud-assistant-registration-20261114.json)。这一步只完成云端库存、签名公钥和 ACL 登记，不代表机器狗云连接已开启。
 
 恢复受控入口后，执行顺序固定为：
 

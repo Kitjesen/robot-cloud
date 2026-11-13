@@ -1,0 +1,27 @@
+{
+  "observedAt": "2026-11-14T02:39:47+08:00",
+  "transport": "aliyun_ecs_cloud_assistant",
+  "instanceId": "i-uf6hb2phe34p0mt1xfca",
+  "host": "8.153.169.177",
+  "region": "cn-shanghai",
+  "agentStatus": "正常",
+  "sshTcp22": "blocked_unchanged",
+  "preflightInvokeId": "t-sh0730b9ltkawow",
+  "registrationInvokeId": "t-sh0730i8ia5vpxc",
+  "registrationStatus": "success",
+  "deviceId": "d82a831a-2e86-4b46-975b-3d42473583b7",
+  "enabled": false,
+  "mosquittoConfigCheck": "passed",
+  "services": {
+    "mosquitto": "active",
+    "doso-robot-cloud-gateway": "active"
+  },
+  "temporaryFilesRemoved": true,
+  "failedAttemptRolledBack": {
+    "invokeId": "t-sh0730hhk7ngq9s",
+    "reason": "inline validation argument unpacking typo",
+    "rollback": "completed"
+  },
+  "cloudLinkStarted": false,
+  "note": "Registration is disabled-only; this does not claim real robot cloud telemetry is online."
+}
