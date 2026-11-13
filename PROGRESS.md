@@ -8,6 +8,8 @@
 
 **21:29 CST 最新只读复核：** `brainstem.service` 已 active，`13145` 可达，四路 CAN 均 UP/ERROR-ACTIVE/1 Mbps，IMU 存在；`13146`、cloud-link 和 grpc proxy 仍未运行。预检仍退出 1，因为 `can0→USB 1-1.1` 与既有脚本要求的 `can0→USB 1-2` 不一致；未执行 CAN 配置或服务动作。[最新原件](artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json)
 
+**用户确认 CAN 恢复后的只读复核：** 当前 Brainstem 为 `flowfix11_prone_20261113_70e3b574`、PID 86758，13145 active；四路 CAN 均 UP，但既有 ROUTES 检查仍拒绝 `can0→USB 1-1.1`。没有切换当前 Brainstem、修改 CAN 或启动 13146。[复核原件](artifacts/robot-cloud/real-connect-20261113/failure-inspection.json)
+
 更新：2026-11-12。本页是当前完成程度、缺口和推进顺序的汇总入口；协议见 [CONTRACT.md](CONTRACT.md)，测试命令与证据边界见 [TESTING.md](TESTING.md)。各条记录区分源码、实际部署与真机证据。
 
 ## 当前完成程度

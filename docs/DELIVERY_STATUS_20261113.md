@@ -26,6 +26,8 @@
 
 最新只读现场复核（2026-11-13 21:29 CST）：`brainstem.service` 已恢复 active，`13145` 可达；`doso-cloud-link` 和 `brainstem-grpc-proxy` 仍 inactive，`13146` 未监听；`can0`–`can3` 均为 UP、ERROR-ACTIVE、1 Mbps，IMU 设备存在。预检仍以退出码 1 拒绝继续，原因是现有映射脚本要求 `can0 → USB 1-2`，实际观察为 `can0 → USB 1-1.1`、`can1 → USB 1-2.1`。没有执行 `ip link set`、服务启停或 CAN 配置。[最新原件](../artifacts/robot-cloud/real-connect-20261113/field-preflight-result.json)
 
+用户随后确认 CAN 已恢复；新的只读检查显示当前 `brainstem.service` 实际运行 `/home/sunrise/deployments/thunder_dual56501_flowfix11_prone_20261113_70e3b574/bundle/bin/thunder`，PID 86758，`13145` active，`13146` 仍未监听，cloud-link 和 grpc proxy 仍 inactive。四路 CAN 仍是 UP/ERROR-ACTIVE/1 Mbps，但 `thunder-can-up.py --check` 继续因 `can0` USB parent 不符合既有 ROUTES 而退出 1；没有改映射或切换当前 flowfix11。[最新只读复核](../artifacts/robot-cloud/real-connect-20261113/failure-inspection.json)
+
 随后通过现有 LAN 主控制端口 `192.168.66.64:13145` 做了六个明确的只读 RPC：`GetControlStatus`、`GetProfile`、`GetCmsState`、`GetMotorStatus`、`GetParams` 成功，`GetVoltage` 因源码核对条件不满足而跳过。当前读回 CMS ZERO、输出关闭、控制方 NONE、关键故障 false、16/16 电机 online、无状态码/错误，当前 profile 为 `all_elbow`；这证明主端口读状态正常，不等于 `13146` 只读桥已部署，也不等于物理禁用确认。[只读原件](../artifacts/robot-cloud/sdk-field-20261112/current-read-api-20261112-native-owner.json)
 
 本轮命令原始输出：[local-lab-check.log](../artifacts/robot-cloud/real-connect-20261113/local-lab-check.log) · [local-auth-check.log](../artifacts/robot-cloud/real-connect-20261113/local-auth-check.log)
