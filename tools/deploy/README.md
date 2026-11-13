@@ -4,7 +4,7 @@
 
 ECS `8.153.169.177` 的既有运行环境为Ubuntu 24.04 / x86_64，部署Mosquitto、Rust Gateway和Nginx HTTPS入口。2026-11-04已部署新版Gateway、自动业务同步配置、报告主题ACL和可写许可状态目录；当次三项服务均为active，Gateway `NRestarts=0`，Broker日志确认Gateway通过TLS 1.3连接，公网未授权查询返回HTTP 401。当前线上是否包含全部后续源码改动，需按实际二进制与发布记录核对。
 
-狗端云连接服务源码已采用 `robot/` 和 `doso-cloud-link` 命名，新名 ARM64 离线候选包已生成并核对架构和内容；研发机上的本机只读入口和本地授权服务已部署，真实设备自动同步和 App 端到端查询仍待验收。部署准备资料见 [LINK.md](LINK.md)：真实设备恢复网络后，先运行只读 [field-preflight.sh](field-preflight.sh) 检查 `13146`、`13148`、choice 和安装 gate，再使用 `127.0.0.1:13148` 的 authorizer API 完成本地授权，不要手工写 `choice` 文件。
+狗端云连接服务源码已采用 `robot/` 和 `doso-cloud-link` 命名，新名 ARM64 离线候选包已生成并核对架构和内容；研发机上的本机只读入口和本地授权服务已部署，真实设备自动同步和 App 端到端查询仍待验收。部署准备资料见 [LINK.md](LINK.md)：真实设备恢复网络后，先运行只读 [field-preflight.sh](field-preflight.sh) 检查 `13146`、`13148`、choice、安装 gate 和两个二进制 SHA256，再使用 `127.0.0.1:13148` 的 authorizer API 完成本地授权，不要手工写 `choice` 文件。
 
 现场维护前先在机器狗上运行 [field-preflight.sh](field-preflight.sh)。它只读取 systemd、端口、IMU 和四路 CAN，并调用 `thunder-can-up.py --check`；不会启动服务、拉起 CAN 或修改配置。只有四路 CAN 都是 UP 且只读检查通过，才进入 Brainstem 候选维护窗口。
 

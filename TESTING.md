@@ -20,6 +20,8 @@
 
 现场预检脚本已补充只读检查 `doso-robot-authorizer.service`、`13148`、`/var/lib/doso-cloud/choice` 和 `DOSO_CLOUD_ON`，仍不会启动服务或修改 CAN；`bash -n tools/deploy/field-preflight.sh` 通过。设备恢复后先执行该预检，再进入授权开启窗口。
 
+预检还会只读计算 `/opt/doso/bin/doso-robot-authorizer` 和 `/opt/doso/bin/doso-cloud-link` 的 SHA256；通过 `DOSO_AUTHORIZER_EXPECTED_SHA256` 与 `DOSO_CLOUD_LINK_EXPECTED_SHA256` 传入 manifest 值时会输出 `match/mismatch`，不匹配只记录结果，不自动覆盖制品或启动服务。
+
 App 与业务状态合同回归（2026-11-14）：App `remote-state-service`、`remote-state-panel`、Profile 远程状态共 30 项 Node 测试通过；Supabase `remote-state-user` 与 `remote-state-sync` 共 26 项 Deno 测试通过。覆盖 `503 unavailable`、设备不可达、旧状态过期、上次成功时间保留、CAS 冲突、模拟设备标记、GNSS 时间和内部字段过滤；没有连接真机，也没有把这些源码回归当成真实上报证据。
 
 本轮在 2026-11-13 20:57 CST 复核了同一工作区：当时 `cargo test --workspace` 为 82 项通过、1 项 ignored，`cargo fmt`、workspace Clippy、`lab check`（8 次模拟读取）和 `lab auth-check`（9 项 MQTT ACL 检查）均通过。之后新增 Gateway 路径回归和远程关闭持久化回归，当前总数为 84 项通过、1 项 ignored。`lab` 使用 `D:/DOSO/toolchains/mosquitto-2.1.2` 的本机 Mosquitto；没有启动真机服务、没有访问 `13146`，也没有修改 CAN 或云端配置。[复核清单](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/offline-regression-20261113T2058+0800.json)

@@ -5,6 +5,10 @@ set -euo pipefail
 imu_port="${HAN_DOG_IMU_PORT:-/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_0e3a84e11af0ef11b457535a6d9880ab-if00-port0}"
 choice_path="${DOSO_CLOUD_CHOICE:-/var/lib/doso-cloud/choice}"
 agent_env="${DOSO_AGENT_ENV:-/etc/doso/robot-cloud/agent/agent.env}"
+authorizer_bin="${DOSO_AUTHORIZER_BIN:-/opt/doso/bin/doso-robot-authorizer}"
+cloud_link_bin="${DOSO_CLOUD_LINK_BIN:-/opt/doso/bin/doso-cloud-link}"
+expected_authorizer_sha256="${DOSO_AUTHORIZER_EXPECTED_SHA256:-}"
+expected_cloud_link_sha256="${DOSO_CLOUD_LINK_EXPECTED_SHA256:-}"
 
 printf 'observed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '\n[services]\n'
@@ -36,6 +40,28 @@ if [ -f "$agent_env" ]; then
 else
   printf 'install_gate=env_missing\n'
 fi
+
+printf '\n[artifacts]\n'
+for pair in "$authorizer_bin|$expected_authorizer_sha256" "$cloud_link_bin|$expected_cloud_link_sha256"; do
+  binary="${pair%%|*}"
+  expected="${pair#*|}"
+  printf '%s ' "$binary"
+  if [ ! -f "$binary" ]; then
+    printf 'missing\n'
+    continue
+  fi
+  actual="$(sha256sum "$binary" | awk '{print $1}')"
+  printf 'sha256=%s' "$actual"
+  if [ -n "$expected" ]; then
+    if [ "$actual" = "$expected" ]; then
+      printf ' expected=match\n'
+    else
+      printf ' expected=mismatch\n'
+    fi
+  else
+    printf ' expected=not_supplied\n'
+  fi
+done
 
 printf '\n[can]\n'
 for name in can0 can1 can2 can3; do
