@@ -26,6 +26,8 @@
 
 随后复核 `192.168.66.64` 的 ping、TCP 22 和 SSH 均超时，未到认证阶段；没有执行机端启动、停止、授权写入、CAN 配置或运动控制。Rust Gateway 按需查询和 `GET /status/latest` 当前均返回 HTTP `503 unavailable`，端点可达但没有机器狗状态回复。[查询证据](../artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json) · [latest 证据](../artifacts/robot-cloud/real-connect-20261113/gateway-latest-20261114.json) 最近一次可达证据仍是 flowfix11 的 `13145`/`13146` 只读状态和 authorizer 部署记录，因此当前下一步必须先恢复机器狗局域网可达，再做只读预检和授权开启。
 
+App/业务合同回归同步完成：App 远程状态相关 Node 30/30 通过，Supabase `remote-state-user` 与 `remote-state-sync` Deno 26/26 通过；这些测试证明不可用、过期和上次成功状态的展示与数据过滤逻辑，不能证明真实机器狗已上报。
+
 本轮新增的离线登记工具测试：`python -m unittest tools/deploy/test_render_device_registration.py -v`，3 项通过。它只生成待审查片段，不能代替 ECS 备份、`mosquitto --test-config`、reload 和真实 Gateway 查询。
 
 本轮新增的远程关闭回归已通过：[local-remote-close-check.log](../artifacts/robot-cloud/real-connect-20261113/local-remote-close-check.log)。模拟设备收到签名 `enabled=false` 后原子保存 `choice=false`、停止采样并退出 cloud-link；重启保持 `cloud_off`，本地 `choice=true` 配合新许可后恢复上报。普通许可到期保持本地选择不变。
