@@ -5,7 +5,7 @@
 ## 本轮回归（2026-11-13）
 
 - DOSO Rust SDK：124 项通过。
-- robot-cloud workspace：82 项通过、1 项 ignored；无失败。
+- robot-cloud workspace：83 项通过、1 项 ignored；无失败。
 - `cargo fmt --all -- --check` 和 workspace Clippy `-D warnings` 通过。
 - `lab check` 和 `lab auth-check` 通过；两者使用本机模拟 Brainstem/Mosquitto，不是真机证据。
 - 真实设备 TLS 到公网 MQTT 已通过；真实 Gateway 对研发 UUID 仍返回 `403 disabled`，ECS SSH 入口仍未开放。

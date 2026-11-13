@@ -1,6 +1,6 @@
 # 云端系统：当前进度与产品推进
 
-**2026-11-13 本轮交付记录：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。Rust SDK 124 项、robot-cloud 工作区 82 项通过且 1 项 ignored，格式与 Clippy 通过；本机模拟云链路和 MQTT ACL 检查通过。新 G1 关闭竞态候选已在目标机重新构建（9 项只读测试、1 项 native close 测试通过），但现场窗口在候选启动前暴露 `usbbus2 errno=6`、`can1` USB 断开和 CAN link DOWN，旧服务停止超时并进入 failed；当前 `can1` 仍 DOWN、Brainstem 没有监听，`13146` 尚未验收。公网 MQTT TLS 已通，真实 Gateway 仍对研发 UUID 返回 `403 disabled`；ECS 登记仍未完成，不能写成真实云状态已交付。
+**2026-11-13 本轮交付记录：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。Rust SDK 124 项、robot-cloud 工作区 83 项通过且 1 项 ignored，格式与 Clippy 通过；本机模拟云链路和 MQTT ACL 检查通过。新 G1 关闭竞态候选已在目标机重新构建（9 项只读测试、1 项 native close 测试通过），但现场窗口在候选启动前暴露 `usbbus2 errno=6`、`can1` USB 断开和 CAN link DOWN，旧服务停止超时并进入 failed；当前 `can1` 仍 DOWN、Brainstem 没有监听，`13146` 尚未验收。公网 MQTT TLS 已通，真实 Gateway 仍对研发 UUID 返回 `403 disabled`；ECS 登记仍未完成，不能写成真实云状态已交付。
 
 **11:36 CST 只读复核：** 现场状态没有自行恢复：`brainstem.service=failed`、`13145/13146/5052` 无监听、`doso-cloud-link` inactive，`can0/2/3` UP 而 `can1` DOWN/STOPPED。没有执行 start/stop 或 CAN 配置。[复核证据](artifacts/robot-cloud/real-connect-20261113/field-recheck-20261113T113631Z.json)
 

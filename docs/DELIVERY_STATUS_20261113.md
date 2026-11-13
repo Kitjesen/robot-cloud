@@ -9,7 +9,7 @@
 | 范围 | 结果 | 说明 |
 | --- | --- | --- |
 | DOSO Rust SDK | 124 项通过 | 8 个库测试、103 个 gRPC/API 测试、2 个消息格式测试、11 个文档测试；工作区 `D:\inovxio\brain\DOSO-SDK` 的 `rust` 分支 |
-| robot-cloud Rust 工作区 | 82 通过，1 ignored | `cargo test --workspace --locked --offline -j 1`；没有失败 |
+| robot-cloud Rust 工作区 | 83 通过，1 ignored | `cargo test --workspace --locked --offline -j 1`；没有失败；新增登记公钥路径越界回归 |
 | 格式与静态检查 | 通过 | `cargo fmt --all -- --check`、workspace Clippy `-D warnings` |
 | 本机模拟云链路 | 通过 | `lab check`：许可、签名状态、状态变化、读失败保留旧时间、关闭、过期、重连、视频、本地关闭持久化 |
 | 本机 MQTT 权限 | 9 项通过 | `lab auth-check`：合法证书、无证书、不受信、跨设备、设备控制主题越权和 Gateway 身份检查 |
