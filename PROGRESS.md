@@ -2,6 +2,8 @@
 
 **2026-11-14 当前交付状态：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。云端只读登记已通过阿里云 ECS 云助手启用（设备 UUID `d82a831a-2e86-4b46-975b-3d42473583b7`，远程运控仍关闭）；机器狗随后暂时不可达，因此尚未证明真实 MQTT `hello/status`。Rust Gateway 的按需查询和 `status/latest` 投影均返回 `503 unavailable`，与设备离线/未建立 cloud-link 一致。本次“失败”是现场网络不可达，不是云端登记失败。[启用证据](artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json) · [查询证据](artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json) · [latest 证据](artifacts/robot-cloud/real-connect-20261113/gateway-latest-20261114.json)
 
+逐项交付审计见 [DELIVERY_AUDIT_20261114.md](docs/DELIVERY_AUDIT_20261114.md)。
+
 本地回归补充：当前工作区 `cargo test --workspace --locked --offline -j 1` 为 94 passed、1 ignored、0 failed，格式检查通过；未执行真机变更。另发现 authorizer ARM64 本地重建 SHA256 与既有部署记录不一致，已暂停制品一致性声明，待机器狗恢复可达后只读核对远端二进制。[哈希审计](artifacts/robot-cloud/real-connect-20261113/authorizer-hash-audit-20261114.json)
 
 App/业务合同补充：App 远程状态相关 Node 测试 30/30 通过，Supabase `remote-state-user` 与 `remote-state-sync` Deno 测试 26/26 通过；当前客户端会把 Gateway `503 unavailable` 显示为不可用/等待状态并保留合法的上次成功时间，不会伪造在线状态。该结果是源码合同证据，仍不替代真实机器狗上报验收。
