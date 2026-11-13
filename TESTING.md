@@ -9,6 +9,7 @@
 - `cargo fmt --all -- --check` 和 workspace Clippy `-D warnings` 通过。
 - `lab check` 和 `lab auth-check` 通过；两者使用本机模拟 Brainstem/Mosquitto，不是真机证据。
 - 真实设备 TLS 到公网 MQTT 的历史探测已通过；云端登记随后已由 ECS 云助手启用为 `enabled=true`，ECS SSH 入口仍未开放。真实机器狗当前不可达，因此尚未完成 MQTT `hello/status` 验收。[启用证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json)
+- 使用 Rust Gateway 查询示例做了一次只读查询，HTTP `503`、错误码 `unavailable`；端点可达但没有当前机器狗状态回复，不能解释为登记失败。[查询证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json)
 - 云端登记 patch 生成器 3 项通过；Gateway 公钥路径越界回归通过。生成器不连接 ECS、不修改输入文件。
 - 远程关闭闭环通过：设备收到签名 `enabled=false` 后原子写入 `choice=false`、停止采样、退出 cloud-link；重启保持 `cloud_off`；本地 `choice=true` 配合新许可后恢复上报。证据：[local-remote-close-check.log](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/local-remote-close-check.log)
 

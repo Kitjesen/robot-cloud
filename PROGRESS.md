@@ -1,6 +1,6 @@
 # 云端系统：当前进度与产品推进
 
-**2026-11-14 当前交付状态：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。云端只读登记已通过阿里云 ECS 云助手启用（设备 UUID `d82a831a-2e86-4b46-975b-3d42473583b7`，远程运控仍关闭）；机器狗随后暂时不可达，因此尚未证明真实 MQTT `hello/status`。本次“失败”是现场网络不可达，不是云端登记失败。[启用证据](artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json)
+**2026-11-14 当前交付状态：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。云端只读登记已通过阿里云 ECS 云助手启用（设备 UUID `d82a831a-2e86-4b46-975b-3d42473583b7`，远程运控仍关闭）；机器狗随后暂时不可达，因此尚未证明真实 MQTT `hello/status`。Rust Gateway 查询当前返回 `503 unavailable`，与设备离线/未建立 cloud-link 一致。本次“失败”是现场网络不可达，不是云端登记失败。[启用证据](artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json) · [查询证据](artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json)
 
 **2026-11-13 本轮交付记录：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。Rust SDK 124 项、robot-cloud 工作区 84 项通过且 1 项 ignored，格式与 Clippy 通过；本机模拟云链路和 MQTT ACL 检查通过，远程关闭持久化和本地重新开启已补齐。现场 G1 窗口在候选启动前曾暴露 `usbbus2 errno=6`、`can1` USB 断开和 CAN link DOWN，旧服务停止超时并进入 failed；随后当前 flowfix11 的映射检查恢复，`127.0.0.1:13146` 已真实读通。公网 MQTT TLS 已通，真实 Gateway 曾对研发 UUID 返回 `403 disabled`；该历史状态随后已通过 ECS 云助手修正，不能把历史拒绝写成当前登记状态。
 
