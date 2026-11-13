@@ -182,6 +182,21 @@ impl Local {
         }
     }
 
+    async fn wait_latest(&self, predicate: impl Fn(&Value) -> bool) -> Result<Value> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let value = self.latest().await?;
+            if predicate(&value) {
+                return Ok(value);
+            }
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "latest state did not reach expected value: {value}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn reporting(&mut self) -> Result<()> {
         use robot_cloud_common::{now_ms, timestamp};
 
@@ -189,7 +204,7 @@ impl Local {
         let state = self
             .wait_for(|value| value["connectionId"].is_string())
             .await?;
-        let connection = state["connectionId"].as_str().unwrap().to_owned();
+        let mut connection = state["connectionId"].as_str().unwrap().to_owned();
         let before = self.brainstem.reads();
         tokio::time::sleep(Duration::from_millis(1100)).await;
         ensure!(
@@ -306,11 +321,26 @@ impl Local {
             self.permission(&disabled).await? == 202,
             "disable was not accepted"
         );
-        self.wait_for(|value| {
+        self.wait_latest(|value| {
             value["permission"]["desiredEnabled"] == false
                 && value["permission"]["deviceConfirmed"] == true
         })
         .await?;
+        self.fixture
+            .processes
+            .last_mut()
+            .unwrap()
+            .wait_success()
+            .await?;
+        let stop_logs = self.fixture.processes.pop().unwrap().logs();
+        ensure!(
+            stop_logs.contains("cloud_connected"),
+            "remote disable did not reach a connected session"
+        );
+        ensure!(
+            fs::read_to_string(self.fixture.path("cloud-choice"))? == "false\n",
+            "remote disable did not persist the local choice"
+        );
         let stopped = self.brainstem.reads();
         tokio::time::sleep(Duration::from_millis(1300)).await;
         ensure!(
@@ -327,26 +357,79 @@ impl Local {
             "disabled consent still allowed on-demand reads"
         );
         println!(
-            "PASS disable: confirmed, sampling stopped, old grant rejected (409), query rejected (403)"
+            "PASS remote disable: confirmed, choice persisted false, process stopped and sampling stopped"
+        );
+
+        self.fixture.spawn(
+            &fixture::binary("doso-cloud-link")?,
+            &self.link_env,
+            "link-off-restart",
+        )?;
+        self.fixture
+            .processes
+            .last_mut()
+            .unwrap()
+            .wait_success()
+            .await?;
+        let off_restart_logs = self.fixture.processes.pop().unwrap().logs();
+        ensure!(
+            off_restart_logs.contains("cloud_off") && !off_restart_logs.contains("cloud_connected"),
+            "remote disable did not survive a process restart"
         );
 
         permission["consentVersion"] = json!(3);
         permission["reportingSessionId"] = json!(uuid::Uuid::new_v4().to_string());
-        permission["expiresAt"] = json!(timestamp(now_ms() + 3000));
+        permission["connectionId"] = json!(connection);
+        permission["expiresAt"] = json!(timestamp(now_ms() + 15_000));
         ensure!(
             self.permission(&permission).await? == 202,
-            "short lease was not accepted"
+            "local reopen grant was not accepted"
+        );
+        fs::write(self.fixture.path("cloud-choice"), "true\n")?;
+        self.fixture.spawn(
+            &fixture::binary("doso-cloud-link")?,
+            &self.link_env,
+            "link-reopen",
+        )?;
+        let reopened = self
+            .wait_for(|value| {
+                value["connectionId"]
+                    .as_str()
+                    .is_some_and(|id| id != connection)
+            })
+            .await?;
+        let reopened_connection = reopened["connectionId"]
+            .as_str()
+            .context("missing reopened connection")?
+            .to_owned();
+        connection = reopened_connection.clone();
+        permission["connectionId"] = json!(reopened_connection);
+        permission["reportingSessionId"] = json!(uuid::Uuid::new_v4().to_string());
+        ensure!(
+            self.permission(&permission).await? == 202,
+            "reopened session grant was not accepted"
         );
         self.wait_for(|value| {
             value["permission"]["deviceConfirmed"] == true && value["fresh"] == true
         })
         .await?;
+        println!("PASS local reopen: choice true plus a new grant restored collection");
+
+        permission["expiresAt"] = json!(timestamp(now_ms() + 3000));
+        ensure!(
+            self.permission(&permission).await? == 202,
+            "short lease was not accepted"
+        );
         tokio::time::sleep(Duration::from_millis(3200)).await;
         let expired_reads = self.brainstem.reads();
         tokio::time::sleep(Duration::from_millis(1300)).await;
         ensure!(
             self.brainstem.reads() == expired_reads && self.latest().await?["fresh"] == false,
             "expired lease continued sampling"
+        );
+        ensure!(
+            fs::read_to_string(self.fixture.path("cloud-choice"))? == "true\n",
+            "permission expiry rewrote the local choice"
         );
         permission["expiresAt"] = json!(timestamp(now_ms() + 15_000));
         ensure!(

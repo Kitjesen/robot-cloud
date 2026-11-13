@@ -5,13 +5,14 @@
 ## 本轮回归（2026-11-13）
 
 - DOSO Rust SDK：124 项通过。
-- robot-cloud workspace：83 项通过、1 项 ignored；无失败。
+- robot-cloud workspace：84 项通过、1 项 ignored；无失败。
 - `cargo fmt --all -- --check` 和 workspace Clippy `-D warnings` 通过。
 - `lab check` 和 `lab auth-check` 通过；两者使用本机模拟 Brainstem/Mosquitto，不是真机证据。
 - 真实设备 TLS 到公网 MQTT 已通过；真实 Gateway 对研发 UUID 仍返回 `403 disabled`，ECS SSH 入口仍未开放。
 - 云端登记 patch 生成器 3 项通过；Gateway 公钥路径越界回归通过。生成器不连接 ECS、不修改输入文件。
+- 远程关闭闭环通过：设备收到签名 `enabled=false` 后原子写入 `choice=false`、停止采样、退出 cloud-link；重启保持 `cloud_off`；本地 `choice=true` 配合新许可后恢复上报。证据：[local-remote-close-check.log](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/local-remote-close-check.log)
 
-本轮在 2026-11-13 20:57 CST 复核了同一工作区：当时 `cargo test --workspace` 为 82 项通过、1 项 ignored，`cargo fmt`、workspace Clippy、`lab check`（8 次模拟读取）和 `lab auth-check`（9 项 MQTT ACL 检查）均通过。之后新增的 Gateway 路径回归使当前总数为 83 项通过、1 项 ignored。`lab` 使用 `D:/DOSO/toolchains/mosquitto-2.1.2` 的本机 Mosquitto；没有启动真机服务、没有访问 `13146`，也没有修改 CAN 或云端配置。[复核清单](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/offline-regression-20261113T2058+0800.json)
+本轮在 2026-11-13 20:57 CST 复核了同一工作区：当时 `cargo test --workspace` 为 82 项通过、1 项 ignored，`cargo fmt`、workspace Clippy、`lab check`（8 次模拟读取）和 `lab auth-check`（9 项 MQTT ACL 检查）均通过。之后新增 Gateway 路径回归和远程关闭持久化回归，当前总数为 84 项通过、1 项 ignored。`lab` 使用 `D:/DOSO/toolchains/mosquitto-2.1.2` 的本机 Mosquitto；没有启动真机服务、没有访问 `13146`，也没有修改 CAN 或云端配置。[复核清单](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/offline-regression-20261113T2058+0800.json)
 
 随后 21:29 CST 只读现场复核显示 Brainstem active、13145 可达、四路 CAN 均 UP/ERROR-ACTIVE/1 Mbps、IMU 存在；`field-preflight.sh` 仍因 `can0` 的 USB parent 与既有映射脚本不一致而退出 1。没有启停服务、写 CAN 或访问 13146。
 
@@ -210,7 +211,7 @@ Rust SDK 新增 `localization.location()`、`watch_location()`，LingTu gRPC 复
 | 遥测历史与ThingsBoard | 2026-11-08 | Rust9项、Deno31项；真实PG37组加实际平台4组=41组通过。实际SQL、生产handler、Rust和TB执行，源为模拟设备，PostgREST传输替换为白名单psql适配；无生产部署或真机验收 |
 | GPS跟随与日期轨迹 | 2026-11-09 [TRACKS.md](docs/TRACKS.md) | 测试ECS实际SQL/HTTPS接口、ECS Rust投递、本机真实TB和实际Web App分段验证；关闭停采、后台更新与恢复均有实测，详见下节；不是独立常驻云平台或真机验收 |
 | DOSO管理后台 | 2026-11-11 | 紧凑铃铛最终生产编译414.538秒、本机18081已部署；9项源码自检、45项HTTP/API/WS及202资源、Chromium桌面/手机10项检查通过。保留此前侧栏与登录验证记录；浏览器双账号切换、空态、其他浏览器和负载另验 |
-| 完全断云与本地重新开启 | 待实现及验证 | 上报停止不等于MQTT断开；可信本地写入、服务唤起与远程持久化关闭仍缺接线 |
+| 完全断云与本地重新开启 | 模拟链路已实现并验证 | 真机 cloud-link、真实远程关闭和 App/业务许可端到端仍待验证 |
 | 真实机器狗和正式手机/G20 | 部分只读证据，产品交付待验收 | 11月12日仅候选安装关闭态与本地SDK真实观察短窗；正式身份、真实云状态、扫码、独立公网MQTT、手机/G20与5G仍未验收 |
 
 11月7日本地联调由Rust工具运行，云连接服务、Gateway与Mosquitto使用真实实现，Brainstem使用只读模拟服务；11月12日SDK观察短窗的上游则为真实机器狗，范围见本页首节。每条证据按其实际业务后端、网络和客户端组成解释，模拟返回不能作为真机验收证据。

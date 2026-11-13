@@ -51,38 +51,80 @@ impl Read {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Publication {
+    Normal,
+    Report,
+    StopAck,
+}
+
 #[derive(Default)]
 struct Publications {
-    queued: VecDeque<bool>,
+    queued: VecDeque<Publication>,
     report_id: Option<u16>,
+    stop_ack_id: Option<u16>,
 }
 
 impl Publications {
     fn busy(&self) -> bool {
-        self.report_id.is_some() || self.queued.iter().any(|report| *report)
+        self.report_id.is_some()
+            || self
+                .queued
+                .iter()
+                .any(|publication| *publication == Publication::Report)
     }
 
     fn publish(&mut self, client: &AsyncClient, topic: &str, bytes: Vec<u8>, report: bool) -> bool {
+        self.publish_kind(
+            client,
+            topic,
+            bytes,
+            if report {
+                Publication::Report
+            } else {
+                Publication::Normal
+            },
+        )
+    }
+
+    fn publish_stop_ack(&mut self, client: &AsyncClient, topic: &str, bytes: Vec<u8>) -> bool {
+        self.publish_kind(client, topic, bytes, Publication::StopAck)
+    }
+
+    fn publish_kind(
+        &mut self,
+        client: &AsyncClient,
+        topic: &str,
+        bytes: Vec<u8>,
+        publication: Publication,
+    ) -> bool {
         if client
             .try_publish(topic, QoS::AtLeastOnce, false, bytes)
             .is_err()
         {
             return false;
         }
-        self.queued.push_back(report);
+        self.queued.push_back(publication);
         true
     }
 
     fn sent(&mut self, id: u16) {
-        if self.queued.pop_front() == Some(true) {
-            self.report_id = Some(id);
+        match self.queued.pop_front() {
+            Some(Publication::Report) => self.report_id = Some(id),
+            Some(Publication::StopAck) => self.stop_ack_id = Some(id),
+            _ => {}
         }
     }
 
-    fn acknowledged(&mut self, id: u16) {
+    fn acknowledged(&mut self, id: u16) -> bool {
+        let stop_ack = self.stop_ack_id == Some(id);
         if self.report_id == Some(id) {
             self.report_id = None;
         }
+        if stop_ack {
+            self.stop_ack_id = None;
+        }
+        stop_ack
     }
 }
 
@@ -100,6 +142,7 @@ pub(super) async fn run(
     let mut last_read: Option<Instant> = None;
     let mut hello = interval(Duration::from_millis(HELLO_MS));
     let mut sample = interval(Duration::from_millis(REPORT_MS));
+    let mut remote_stop_deadline: Option<Instant> = None;
     hello.set_missed_tick_behavior(MissedTickBehavior::Skip);
     sample.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let stop = shutdown_signal();
@@ -118,7 +161,8 @@ pub(super) async fn run(
         tokio::select! {
             biased;
             _ = &mut stop => break Exit::Stopped,
-            _ = choice.closed() => break Exit::Stopped,
+            _ = choice.closed(), if remote_stop_deadline.is_none() => break Exit::Stopped,
+            _ = async { tokio::time::sleep_until(remote_stop_deadline.expect("remote stop deadline").into()).await }, if remote_stop_deadline.is_some() => break Exit::Stopped,
             _ = async { tokio::time::sleep_until(video_deadline.expect("video lease").into()).await }, if video_deadline.is_some() => {
                 if let Err(error) = source.request_stop() { eprintln!("video_stop_error reason={error}"); }
             },
@@ -159,7 +203,11 @@ pub(super) async fn run(
                     println!("cloud_connected");
                 }
                 Ok(Event::Outgoing(Outgoing::Publish(id))) => publications.sent(id),
-                Ok(Event::Incoming(Packet::PubAck(ack))) => publications.acknowledged(ack.pkid),
+                Ok(Event::Incoming(Packet::PubAck(ack))) => {
+                    if publications.acknowledged(ack.pkid) {
+                        break Exit::Stopped;
+                    }
+                }
                 Ok(Event::Incoming(Packet::Publish(message))) => {
                     if online.is_none() || message.retain { continue; }
                     let now = now_ms();
@@ -170,9 +218,24 @@ pub(super) async fn run(
                             }
                     } else if message.topic.as_ref() == device.topics.control.as_bytes() {
                         if let Ok(bytes) = device.control(&message.payload, now, Instant::now()) {
-                            if device.reporting.disabled() { read = None; }
-                            if !publications.publish(&client, &device.topics.acks, bytes, false) {
+                            let remote_stop = device.reporting.disabled();
+                            if remote_stop {
+                                if let Err(error) = choice.disable() {
+                                    eprintln!("remote_stop_persist_error reason={error}");
+                                    break Exit::Config("remote_stop_persist_failed");
+                                }
+                                read = None;
+                            }
+                            let published = if remote_stop {
+                                publications.publish_stop_ack(&client, &device.topics.acks, bytes)
+                            } else {
+                                publications.publish(&client, &device.topics.acks, bytes, false)
+                            };
+                            if !published {
                                 break Exit::Retry("publish_queue_unavailable");
+                            }
+                            if remote_stop {
+                                remote_stop_deadline = Some(Instant::now() + Duration::from_secs(1));
                             }
                         }
                     } else if message.topic.as_ref() == device.topics.requests.as_bytes()
@@ -253,7 +316,11 @@ mod tests {
     #[test]
     fn only_matching_report_ack_releases_sampling() {
         let mut publications = Publications::default();
-        publications.queued.extend([false, true, false]);
+        publications.queued.extend([
+            Publication::Normal,
+            Publication::Report,
+            Publication::Normal,
+        ]);
         assert!(publications.busy());
         publications.sent(10);
         publications.acknowledged(10);

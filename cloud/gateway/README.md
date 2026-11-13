@@ -26,7 +26,7 @@ Gateway 使用 rumqttc 的 MQTT 5 客户端与 mTLS，订阅回复主题并收�
 
 2026-11-04已有新版Gateway、后台自动同步配置和报告主题ACL的ECS部署记录。2026-11-07另用已登记模拟设备跑通实际Web App、业务后端、PostgreSQL、隔离云Gateway及正式cloud-link，验证开启、退页面续期、断网恢复和关闭停采，见[模拟设备链路记录](../../docs/SIMULATED_FLOW.md)。该链路通过SSH隧道连接本机MQTT，Brainstem和设备状态为模拟；真实机器狗、5G和独立公网MQTT仍待验收。旧发布包与当前源码的能力应按各自构建记录核对。
 
-用户本地可信开启、断云后的本地重新开启、远程关闭后持久化关闭并断云仍缺完整实现。现有上报许可关闭可停止采集和拒收数据，不能据此报告MQTT已完全断开。实现及部署进度统一见 [PROGRESS.md](../../PROGRESS.md)。
+用户本地可信开启、断云后的本地重新开启、远程关闭后持久化关闭并断云已在本地 Rust cloud-link + Gateway 模拟 mTLS 链路实现并回归；真机安装、真实设备 ACL、业务许可和 App 端到端仍需按 [PROGRESS.md](../../PROGRESS.md) 验收。普通许可到期仍不会改写本地用户选择。
 
 ## 开发入口
 

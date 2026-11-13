@@ -26,7 +26,7 @@ Brainstem 只读状态
 | G2 机器狗云连接 | cloud-link 安装、关闭态自检、证书加载、MQTT 连接和许可检查通过 | 二进制已安装；`DOSO_CLOUD_ON=false`；未启动 | robot-cloud/robot |
 | G3 云端通道 | Broker 接受真实设备证书；真实 UUID 有精确 ACL；Gateway 验证设备签名并返回状态 | TLS 握手通过；Gateway 对 UUID 返回 `403 disabled` | cloud/broker、cloud/gateway、ECS |
 | G4 业务与 App | 用户许可开启后，Gateway 状态进入业务库，App 显示状态与时间；历史投递不越权 | 模拟链路已通过；真机未通过 | 业务后端、App、telemetry |
-| G5 关闭与回滚 | 用户关闭后停止新读取/上报并断云；重启保持关闭；移除候选可回到旧 Brainstem | 关闭态模拟已通过；真机断云未验收 | robot/cloud/业务后端 |
+| G5 关闭与回滚 | 用户关闭后停止新读取/上报并断云；重启保持关闭；移除候选可回到旧 Brainstem | 远程关闭持久化、MQTT 退出、重启保持关闭和本地重新开启已通过模拟链路；真机断云未验收 | robot/cloud/业务后端 |
 
 只有 G0–G5 全部通过，才把真实机器狗云连接写成已交付。
 
