@@ -103,6 +103,12 @@ python3 tools/deploy/render-device-registration.py \
 
 先检查 `registration-report.json`、`device-entry.json` 和 `acl-entry.conf`，再将它们作为一次受控变更上传。输出目录中的公钥是公开材料；私钥不应出现在目录中。
 
+ECS 入口恢复后可使用 [apply-device-registration.sh](apply-device-registration.sh) 执行同一变更。脚本要求 root，先备份现有登记/ACL，拒绝重复 UUID 和非预期六行 ACL，原子写入设备登记，运行 `mosquitto --test-config` 后仅 reload；任一步失败会恢复备份。第一次调用只允许 `enabled=false`，不会启动 Gateway 或机器狗 cloud-link。
+
+```sh
+sh tools/deploy/apply-device-registration.sh /受限路径/cloud-patch
+```
+
 准备启用真实设备时，由运维完成以下 ECS 配置。先备份现有登记和 ACL，核对现有内容，并保留所有原条目。设备公钥存为 `/etc/doso/robot-cloud/gateway/device-真实UUID-signing.pub`，所有者 `root:doso-cloud`、权限 640。
 
 在现有 `/etc/doso/robot-cloud/gateway/devices.json` 的 `devices` 数组中追加一个条目，确认同一 UUID 只有一条。下面为单个条目的结构，替换占位符后再加入现有数组。
