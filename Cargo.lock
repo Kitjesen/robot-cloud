@@ -327,6 +327,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "doso-robot-authorizer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "serde",
+ "sha2",
+ "subtle",
+ "tokio",
+ "tower",
+ "uuid",
+]
+
+[[package]]
 name = "doso-cloud-media"
 version = "0.1.0"
 dependencies = [

@@ -1,5 +1,5 @@
 [workspace]
-members = ["shared", "robot", "cloud/gateway", "cloud/media", "cloud/telemetry", "tools/lab"]
+members = ["shared", "robot", "robot-authorizer", "cloud/gateway", "cloud/media", "cloud/telemetry", "tools/lab"]
 resolver = "2"
 
 [workspace.package]
