@@ -1,0 +1,22 @@
+[Unit]
+Description=DOSO local cloud choice authorizer
+After=local-fs.target
+RequiresMountsFor=/var/lib/doso-cloud
+
+[Service]
+Type=simple
+User=root
+Group=doso-cloud
+EnvironmentFile=-/etc/doso/robot-authorizer/env
+ExecStart=/opt/doso/bin/doso-robot-authorizer
+Restart=on-failure
+RestartSec=2
+UMask=0027
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/doso-cloud
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

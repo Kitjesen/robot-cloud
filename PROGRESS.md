@@ -6,6 +6,8 @@
 
 App/业务合同补充：App 远程状态相关 Node 测试 30/30 通过，Supabase `remote-state-user` 与 `remote-state-sync` Deno 测试 26/26 通过；当前客户端会把 Gateway `503 unavailable` 显示为不可用/等待状态并保留合法的上次成功时间，不会伪造在线状态。该结果是源码合同证据，仍不替代真实机器狗上报验收。
 
+制品准备补充：已固化待部署的 ARM64 authorizer 发布包和 manifest，远端部署状态保持 pending；不会用未核对的旧哈希开启机器狗。[发布 manifest](artifacts/robot-cloud/releases/20261114-authorizer-aarch64/manifest.json)
+
 **2026-11-13 本轮交付记录：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。Rust SDK 124 项、robot-cloud 工作区 84 项通过且 1 项 ignored，格式与 Clippy 通过；本机模拟云链路和 MQTT ACL 检查通过，远程关闭持久化和本地重新开启已补齐。现场 G1 窗口在候选启动前曾暴露 `usbbus2 errno=6`、`can1` USB 断开和 CAN link DOWN，旧服务停止超时并进入 failed；随后当前 flowfix11 的映射检查恢复，`127.0.0.1:13146` 已真实读通。公网 MQTT TLS 已通，真实 Gateway 曾对研发 UUID 返回 `403 disabled`；该历史状态随后已通过 ECS 云助手修正，不能把历史拒绝写成当前登记状态。
 
 **11:36 CST 只读复核：** 现场状态没有自行恢复：`brainstem.service=failed`、`13145/13146/5052` 无监听、`doso-cloud-link` inactive，`can0/2/3` UP 而 `can1` DOWN/STOPPED。没有执行 start/stop 或 CAN 配置。[复核证据](artifacts/robot-cloud/real-connect-20261113/field-recheck-20261113T113631Z.json)

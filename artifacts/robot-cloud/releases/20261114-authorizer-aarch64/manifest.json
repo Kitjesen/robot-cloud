@@ -1,0 +1,10 @@
+{
+  "packageSha256": "F4CCC2A980A85D73C529146F19D16782D6E3B9FCCADD6A4645190DE817C88B92",
+  "binarySha256": "BADDBDB925E5F87067BB510C3B954D2D85C11EC95D51225555F3A5F3524A0E40",
+  "target": "aarch64-unknown-linux-gnu.2.35",
+  "binary": "bin/doso-robot-authorizer",
+  "remoteMotion": false,
+  "package": "doso-robot-authorizer-aarch64.tar.gz",
+  "sourceCommit": "a4ab2fc",
+  "remoteDeployment": "pending_robot_reachability"
+}

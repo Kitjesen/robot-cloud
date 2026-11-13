@@ -2,6 +2,8 @@
 
 更新：2026-11-14。当前源码目录为 `robot/`、`cloud/`、`shared/`、`tools/`；包名和目标二进制名沿用原合同。研发机已安装 ARM64 `doso-cloud-link` 候选、本机 authorizer 和独立身份材料；云端设备登记已启用，但目标机当前不可达，不能把安装记录写成真实 MQTT 上线。其他候选包、ABI 和安装记录仍属于各自标明的历史构建，当前源码与线上制品须核对具体制品。
 
+本地 authorizer 的可复核 ARM64 发布候选已固化到 [20261114-authorizer-aarch64](D:/DOSO/robot-cloud/artifacts/robot-cloud/releases/20261114-authorizer-aarch64/manifest.json)。该包尚未部署到机器狗；现场部署前后必须校验 manifest 中的 binary SHA256，远程制品验证完成前不执行授权开启。
+
 ## 当前 ARM64 云连接候选（2026-11-12）
 
 ### 2026-11-13 远程关闭持久化候选
