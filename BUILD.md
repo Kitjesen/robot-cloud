@@ -4,6 +4,22 @@
 
 ## 当前 ARM64 云连接候选（2026-11-12）
 
+### 2026-11-13 远程关闭持久化候选
+
+本轮源码已重新交叉编译为 AArch64 Linux 候选，加入远程 `enabled=false` 持久化本地 `choice=false`、停止采样并断开 cloud-link，以及本地重新开启后的新许可流程。候选包位于
+`D:\DOSO\artifacts\robot-cloud\releases\20261113-cloud-link-aarch64-remote-close\link-aarch64.tar.gz`。
+
+| 项目 | 值 |
+| --- | --- |
+| ARM64 ELF | 4,487,048 bytes，AArch64 |
+| 二进制 SHA256 | `15a1603fcd3af3feba71d3481e91f481011bfce0b80f141df6015517dd7bea76` |
+| 包 SHA256 | `46016e2bf0092e44230347d94d6ff5135db085d278feee98820d900841730ac1` |
+| Cargo.lock SHA256 | `86daa7df13755cf8df3db69420eee5e9a44c0f3297b2dbe9df0664c0c048d547` |
+| 关闭闭环测试 | 远程关闭、重启保持关闭、本地重新开启、许可到期不改 choice 均通过 |
+| 真机状态 | 未安装；13146/G1 尚未验收 |
+
+该候选没有设备私钥，默认保持 `DOSO_CLOUD_ON=false`。它只证明新源码可生成可交付 ARM64 包；在现场安装前仍必须通过 CAN/Brainstem 前置检查、G1 维护窗口、G3 云端登记和证书验收。
+
 已用当前工作区源码重新构建 `doso-cloud-link`，目标为 `aarch64-unknown-linux-gnu.2.35`。候选包位于
 `D:\DOSO\artifacts\robot-cloud\releases\20261112-cloud-link-aarch64\link-aarch64.tar.gz`，包内默认保持
 `DOSO_CLOUD_ON=false`，不包含设备私钥。
