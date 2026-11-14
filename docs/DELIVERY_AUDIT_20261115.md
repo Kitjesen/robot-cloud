@@ -58,6 +58,10 @@ cargo run --locked --offline -p lab -- check
 
 证据：[cloud-link-regression-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-link-regression-20261115.json) · [lab-check-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/lab-check-20261115.json)。
 
+业务后端路由的无凭据探测确认 `remote-state`、`remote-state-sync`、`device-binding` 和 `admin-devices` 已部署并按方法限制响应；未发送任何账号、设备或认领凭据。[路由探测](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/business-route-probe-20261115.json)
+
+App 远程状态 Node 回归 `30/30`，Supabase `remote-state-user` 与 `remote-state-sync` Deno 回归 `27/27`。本轮修正了一项过时的 Profile 文案断言，使测试与当前“搜索机器狗 Wi-Fi / 设备接入”界面一致；这不改变真实设备绑定状态。[App/业务回归](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/app-remote-state-regression-20261115.json)
+
 ## 交付判断
 
 当前已经交付并证明：
