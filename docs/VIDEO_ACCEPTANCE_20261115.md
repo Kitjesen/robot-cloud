@@ -12,6 +12,8 @@
 | 局域网 WebRTC/WHEP | `PASS`（查看器） | `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-webrtc-acceptance-20261115.json` | 真实 LAN 查看器收到 640×480 帧且计数增长；不是公网或正式 App 验收 |
 | 公网 WebRTC/WHEP | `NOT_DEPLOYED` | `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/public-whep-probe-20261115.json` | `media-test.dosorobotics.com` TLS 可达，但 status/WHEP 路由为 404，未发送 viewer 凭据或 SDP |
 
+重复只读请求仍能观察到 relay 冷启动/就绪抖动：5 次请求中 2 次返回 JPEG、3 次 5 秒零字节超时。[窗口证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/relay-retry-window-20261115.json)
+
 ## 本轮现场只读观察
 
 机器狗当前可通过 SSH 只读检查到：`13146`、`13148`、HTTP `5050`、go2rtc `1984`、RTSP `8554` 和 ICE `8555` 正在监听；正式 SDK Gateway `5052` 没有监听。相机状态接口报告 `streaming`，go2rtc `api/frame.jpeg?src=cam` 当前可返回 JPEG。这个结果只说明媒体源存在，不能替代正式 SDK Gateway 部署。
