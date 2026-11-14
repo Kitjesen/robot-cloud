@@ -1,6 +1,8 @@
 # 云端系统：当前进度与产品推进
 
-**2026-11-14 当前交付状态：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。云端只读登记已通过阿里云 ECS 云助手启用（设备 UUID `d82a831a-2e86-4b46-975b-3d42473583b7`，远程运控仍关闭）；机器狗随后暂时不可达，因此尚未证明真实 MQTT `hello/status`。Rust Gateway 的按需查询和 `status/latest` 投影均返回 `503 unavailable`，与设备离线/未建立 cloud-link 一致。本次“失败”是现场网络不可达，不是云端登记失败。[启用证据](artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json) · [查询证据](artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json) · [latest 证据](artifacts/robot-cloud/real-connect-20261113/gateway-latest-20261114.json)
+**2026-11-14 当前交付状态：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。云端只读登记已通过阿里云 ECS 云助手启用（设备 UUID `d82a831a-2e86-4b46-975b-3d42473583b7`，远程运控仍关闭）；机器狗曾通过 authorizer 开启 cloud-link 并建立 MQTT TCP 会话，但研发库存未绑定账号，业务同步返回 `permission:null`，没有形成状态上报。设备随后再次不可达。Rust Gateway 的按需查询和 `status/latest` 投影返回 `503 unavailable`，当前结论是“传输层通过、业务许可和状态投影待完成”。[现场证据](artifacts/robot-cloud/real-connect-20261113/real-cloud-activation-20261114.json) · [查询证据](artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json) · [latest 证据](artifacts/robot-cloud/real-connect-20261113/gateway-latest-20261114.json)
+
+**2026-11-14 真实云连接窗口补充：** 设备在窗口开始时可达，`13146` 只读状态为 grounded、输出关闭、控制方 none；通过本机 authorizer 开启后，`doso-cloud-link` active，MQTT TCP 到 `8.153.169.177:8883` established，日志出现 `cloud_connected`。业务同步对该 UUID 返回 `permission:null`，研发库存尚未绑定账号，Gateway 未下发 reporting lease，所以 `status` 与 `status/latest` 仍为 `503 unavailable`。设备随后再次离开局域网，云状态上报、App 读取和关闭回退保持待验收。没有发送运动命令或修改 CAN。[现场证据](artifacts/robot-cloud/real-connect-20261113/real-cloud-activation-20261114.json)
 
 逐项交付审计见 [DELIVERY_AUDIT_20261114.md](docs/DELIVERY_AUDIT_20261114.md)。
 

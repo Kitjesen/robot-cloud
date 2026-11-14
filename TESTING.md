@@ -4,11 +4,19 @@
 
 ## 本轮回归（2026-11-14）
 
+### 真实机器狗云连接窗口
+
+- 真机 `192.168.66.64` 在窗口开始时可达。只读预检确认 `brainstem.service` active、`127.0.0.1:13146` 监听、`choice=false`、`doso-cloud-link` inactive，四路 CAN 为 `UP/ERROR-ACTIVE/1Mbps`，IMU 设备存在。
+- 通过 `127.0.0.1:13148/v1/cloud/choice` 的 authorizer API 开启只读云连接，返回 `{"enabled":true}`。机端保存 `choice=true`，`doso-cloud-link` active，日志出现 `cloud_connected`，到 MQTT `8.153.169.177:8883` 的 TCP 连接建立。没有写 choice 文件、没有启动控制代理、没有发送运动命令。
+- 业务 `remote-state-sync` 对该 UUID 返回 `permission:null`。研发库存尚未绑定账号，因此没有短期状态许可，Gateway 未下发 `reporting.control`，`POST /status` 和 `GET /status/latest` 仍返回 `503 unavailable`。云 MQTT 传输层通过，真实状态上报和 App 读取未通过。
+- 设备随后从局域网消失，尚未完成许可下发后的 `status.report`、远程关闭、重启保持关闭和本地重新开启。最后一次成功控制状态读取为 `GROUNDED`、电机输出关闭、控制方 `NONE`、无严重电机故障、无 gRPC lease。
+- 原始证据：`D:/DOSO/artifacts/robot-cloud/real-connect-20261113/field-preflight-sudo-20261114.json`、`read-current-13146.json`、`real-cloud-activation-20261114.json`、`real-cloud-observe-20261114.json`。本节不把短暂 `cloud_connected` 记录写成完整云端验收。
+
 - DOSO Rust SDK：124 项通过。
 - robot-cloud workspace：84 项通过、1 项 ignored；无失败。
 - `cargo fmt --all -- --check` 和 workspace Clippy `-D warnings` 通过。
 - `lab check` 和 `lab auth-check` 通过；两者使用本机模拟 Brainstem/Mosquitto，不是真机证据。
-- 真实设备 TLS 到公网 MQTT 的历史探测已通过；云端登记随后已由 ECS 云助手启用为 `enabled=true`，ECS SSH 入口仍未开放。真实机器狗当前不可达，因此尚未完成 MQTT `hello/status` 验收。[启用证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json)
+- 真实设备 TLS 到公网 MQTT 的历史探测已通过；云端登记随后已由 ECS 云助手启用为 `enabled=true`，ECS SSH 入口仍未开放。本轮机器狗曾通过 authorizer 开启 cloud-link 并建立 MQTT TCP 会话，但业务许可为空，尚未形成可读 `status.report`。设备随后再次不可达。[启用证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json) · [本轮证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-cloud-observe-20261114.json)
 - 使用 Rust Gateway 查询示例做了一次只读查询，HTTP `503`、错误码 `unavailable`；端点可达但没有当前机器狗状态回复，不能解释为登记失败。[查询证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json)
 - 通过 `GET /status/latest` 做了第二次只读投影检查，同样返回 HTTP `503` 和 `unavailable`；这确认当前没有可供 App 读取的实时状态投影，不改变云端登记结果。[latest 证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/gateway-latest-20261114.json)
 - 云端登记 patch 生成器 3 项通过；Gateway 公钥路径越界回归通过。生成器不连接 ECS、不修改输入文件。

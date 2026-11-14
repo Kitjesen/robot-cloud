@@ -53,7 +53,7 @@ for pair in "$authorizer_bin|$expected_authorizer_sha256" "$cloud_link_bin|$expe
   actual="$(sha256sum "$binary" | awk '{print $1}')"
   printf 'sha256=%s' "$actual"
   if [ -n "$expected" ]; then
-    if [ "$actual" = "$expected" ]; then
+    if [ "${actual,,}" = "${expected,,}" ]; then
       printf ' expected=match\n'
     else
       printf ' expected=mismatch\n'

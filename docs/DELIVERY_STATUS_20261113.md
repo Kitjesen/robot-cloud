@@ -4,6 +4,12 @@
 
 这份记录只写本轮实际执行结果。模拟链路、源码测试、云端公网探测和真机部署分开统计。
 
+## 2026-11-14 真实云连接窗口补充
+
+设备在窗口开始时可达。只读预检确认 Brainstem active、`127.0.0.1:13146` 监听、`choice=false`、四路 CAN 为 `UP/ERROR-ACTIVE/1Mbps`，并通过 13146 读回 `GROUNDED`、电机输出关闭、控制方 `NONE`、无严重电机故障、无 gRPC lease。通过 `127.0.0.1:13148` authorizer API 开启后，设备保存 `choice=true`，`doso-cloud-link` active，MQTT TCP 到 `8.153.169.177:8883` established，日志出现 `cloud_connected`。[前置证据](../artifacts/robot-cloud/real-connect-20261113/field-preflight-sudo-20261114.json) · [开启证据](../artifacts/robot-cloud/real-connect-20261113/real-cloud-activation-20261114.json) · [云连接证据](../artifacts/robot-cloud/real-connect-20261113/real-cloud-observe-20261114.json)
+
+业务 `remote-state-sync` 对该 UUID 返回 `permission:null`。研发库存尚未绑定账号，Gateway 没有下发 `reporting.control`，因此 `POST /status` 和 `GET /status/latest` 仍为 `503 unavailable`。设备随后再次离开局域网，尚未完成许可下发后的 `status.report`、App 读取、远程关闭、重启保持关闭和本地重新开启。该窗口没有发送运动命令或修改 CAN。
+
 ## 本轮已验证
 
 | 范围 | 结果 | 说明 |
@@ -14,19 +20,19 @@
 | 本机模拟云链路 | 通过 | `lab check`：许可、签名状态、状态变化、读失败保留旧时间、关闭、过期、重连、视频、本地关闭持久化 |
 | 本机 MQTT 权限 | 9 项通过 | `lab auth-check`：合法证书、无证书、不受信、跨设备、设备控制主题越权和 Gateway 身份检查 |
 | 机器狗到公网 MQTT | TLS 通过 | `8.153.169.177:8883`，TLS 1.3，服务端证书校验通过 |
-| 真实 Gateway 查询 | 历史结果 | 真实 UUID 曾返回 `403 disabled`；随后云端登记已启用，尚未在机器狗恢复可达后重新完成真实 MQTT 查询 |
+| 真实 Gateway 查询 | `503 unavailable`（当前） | 云端登记已启用，真机曾建立 MQTT TCP 会话；业务同步返回 `permission:null`，未下发短期状态许可，未形成 `status.report` |
 | 云端登记变更工具 | 通过 | `render-device-registration.py` 离线校验 UUID v4、重复登记和 ACL 用户；实际 ECS 登记与启用通过阿里云 ECS 云助手完成，见 [启用证据](../artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json) |
 | Gateway 登记路径边界 | 通过 | 拒绝绝对路径、`..` 和其他非普通路径，避免登记文件被篡改后加载登记目录外的公钥；Gateway 27 项测试通过 |
 
 本轮没有发送运动命令、没有使能电机、没有修改 CAN，也没有重启机器狗服务。
 
-制品一致性补充：本地按锁定依赖重建 authorizer ARM64 候选成功，但 SHA256 与部署记录不一致；机器狗不可达，无法读取远端 `/opt/doso/bin/doso-robot-authorizer` 做最终核对。下一次现场窗口先只读校验远端哈希，再决定是否需要重新部署；当前不把“authorizer 已部署”扩展为“当前源码制品已在机端运行”。[哈希审计](../artifacts/robot-cloud/real-connect-20261113/authorizer-hash-audit-20261114.json)
+制品一致性补充：本轮只读预检读取到远端 authorizer SHA256 为 `baddbdb925e5f87067bb510c3b954d2d85c11ec95d51225555f3a5f3524a0e40`，与发布值仅有大小写差异，归一化后匹配；cloud-link SHA256 也匹配。预检脚本已改为大小写不敏感比较，避免再次产生假 mismatch。
 
 ## 2026-11-14 状态修正
 
 云端设备登记已由 `enabled=false` 改为 `enabled=true`，只允许该设备的状态和授权主题；没有开放运动、遥操作、电机或任意 gRPC 透传。该动作只改变云端登记开关，不能替代机端授权，也不能证明机器狗已建立 MQTT 会话。
 
-随后复核 `192.168.66.64` 的 ping、TCP 22 和 SSH 均超时，未到认证阶段；没有执行机端启动、停止、授权写入、CAN 配置或运动控制。Rust Gateway 按需查询和 `GET /status/latest` 当前均返回 HTTP `503 unavailable`，端点可达但没有机器狗状态回复。[查询证据](../artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json) · [latest 证据](../artifacts/robot-cloud/real-connect-20261113/gateway-latest-20261114.json) 最近一次可达证据仍是 flowfix11 的 `13145`/`13146` 只读状态和 authorizer 部署记录，因此当前下一步必须先恢复机器狗局域网可达，再做只读预检和授权开启。
+随后设备从局域网消失，当前 ping、TCP 22 和 SSH 超时。此前云连接窗口内 Gateway 按需查询和 `GET /status/latest` 已重新执行，仍返回 HTTP `503 unavailable`，原因是业务许可为空，不把它写成 MQTT 认证失败。[查询证据](../artifacts/robot-cloud/real-connect-20261113/real-cloud-activation-20261114.json) · [云观察](../artifacts/robot-cloud/real-connect-20261113/real-cloud-observe-20261114.json)
 
 App/业务合同回归同步完成：App 远程状态相关 Node 30/30 通过，Supabase `remote-state-user` 与 `remote-state-sync` Deno 26/26 通过；这些测试证明不可用、过期和上次成功状态的展示与数据过滤逻辑，不能证明真实机器狗已上报。
 
@@ -54,7 +60,7 @@ App/业务合同回归同步完成：App 远程状态相关 Node 30/30 通过，
 
 ### G2：机器狗 cloud-link
 
-新 ARM64 候选已安装到 `/opt/doso/bin/doso-cloud-link`，旧版本备份为 `/opt/doso/bin/doso-cloud-link.before-remote-close-20261113T145748Z`。安装后服务仍 inactive/disabled，关闭态运行退出 0、输出 `cloud_off`，候选 SHA-256 为 `15a1603fcd3af3feba71d3481e91f481011bfce0b80f141df6015517dd7bea76`。[安装原件](../artifacts/robot-cloud/real-connect-20261113/cloud-link-install.json)
+新 ARM64 候选已安装到 `/opt/doso/bin/doso-cloud-link`，候选 SHA-256 为 `15a1603fcd3af3feba71d3481e91f481011bfce0b80f141df6015517dd7bea76`。本轮通过 authorizer API 实际启动过，服务日志出现 `cloud_connected`，但业务许可为空，未形成状态上报。设备随后离线，远程关闭和重启保持关闭仍待验收。[安装原件](../artifacts/robot-cloud/real-connect-20261113/cloud-link-install.json) · [本轮开启](../artifacts/robot-cloud/real-connect-20261113/real-cloud-activation-20261114.json)
 
 ### G3：云端设备登记
 
