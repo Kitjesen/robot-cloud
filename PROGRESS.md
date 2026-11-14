@@ -6,6 +6,8 @@
 
 **2026-11-15 开机恢复检查：** 机器狗恢复可达，Brainstem 和 13146 只读状态通过，`choice=true` 已保留。原有 `doso-cloud-link.service` 为 disabled，已执行 `systemctl enable --now`，当前 enabled/active，MQTT TCP 已建立。预检的 USB 映射要求仍是旧路径，当前观察为 `can0→1-1.2`、`can1→1-2.1`、`can2→1-1.3`、`can3→1-1.4`，四路 CAN 实际均 UP/ERROR-ACTIVE/1Mbps。下一步是 App 绑定账号并生成短期 reporting permission，再验证 Gateway/App 状态上报。没有发送运动命令或修改 CAN。[开机证据](artifacts/robot-cloud/real-connect-20261113/cloud-link-enable-20261115.json)
 
+**2026-11-15 视频验收补充：** 机器狗的 Orbbec、go2rtc relay 和局域网 WHEP 查看器已有只读帧证据；Rust SDK 通过临时只读桥收到单帧及连续 10 帧 JPEG，App 视频合同回归为 59/59。正式 SDK Gateway `5052` 仍未监听，手机 App 真机播放和公网 WHEP 路由仍未验收。分层结果与下一步见 [视频链路验收状态](docs/VIDEO_ACCEPTANCE_20261115.md)。
+
 逐项交付审计见 [DELIVERY_AUDIT_20261114.md](docs/DELIVERY_AUDIT_20261114.md)。
 
 本地回归补充：当前工作区 `cargo test --workspace --locked --offline -j 1` 为 94 passed、1 ignored、0 failed，格式检查通过；未执行真机变更。另发现 authorizer ARM64 本地重建 SHA256 与既有部署记录不一致，已暂停制品一致性声明，待机器狗恢复可达后只读核对远端二进制。[哈希审计](artifacts/robot-cloud/real-connect-20261113/authorizer-hash-audit-20261114.json)
