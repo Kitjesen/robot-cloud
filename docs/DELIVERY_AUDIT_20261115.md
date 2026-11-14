@@ -12,6 +12,7 @@
 - Brainstem 回环 `127.0.0.1:13146` 可读，`GetControlStatus` 返回 `GROUNDED`、电机输出关闭、控制方 `CONTROL_OWNER_NONE`、无严重故障、无 gRPC lease。
 - `doso-cloud-link.service` 为 active，持久化 `choice=true`，到 MQTT `8.153.169.177:8883` 的 mTLS TCP 为 `ESTABLISHED`。
 - `13148` authorizer active；正式 SDK Gateway `5052` 没有监听。
+- 未携带 Bearer 的完整 choice 写请求返回 `401`，前后 choice、authorizer 和 cloud-link 均不变；本次没有读取 token，也没有执行授权写入。[边界证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/authorizer-readonly-boundary-20261115.json)
 - 云端远程运控继续禁止；本窗口没有发送运动、电机、导航、External 或通用 gRPC 命令。
 
 证据：[real-readonly-snapshot-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-readonly-snapshot-20261115.json)。
