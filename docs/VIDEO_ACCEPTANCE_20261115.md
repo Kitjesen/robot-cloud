@@ -14,6 +14,8 @@
 
 重复只读请求仍能观察到 relay 冷启动/就绪抖动：5 次请求中 2 次返回 JPEG、3 次 5 秒零字节超时。[窗口证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/relay-retry-window-20261115.json)
 
+随后用真实 LAN WHEP 查看器预热后，连续 5 次 JPEG 请求全部 HTTP 200，约 26 KB/帧；WHEP 解码计数从 55 增长到 325，丢包为 0。[预热后窗口](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/webrtc-warmup-jpeg-window-20261115.json) 这只能证明“有消费者后稳定”，尚未形成正式 Gateway 的 readiness 语义。
+
 ## 本轮现场只读观察
 
 机器狗当前可通过 SSH 只读检查到：`13146`、`13148`、HTTP `5050`、go2rtc `1984`、RTSP `8554` 和 ICE `8555` 正在监听；正式 SDK Gateway `5052` 没有监听。相机状态接口报告 `streaming`，go2rtc `api/frame.jpeg?src=cam` 当前可返回 JPEG。这个结果只说明媒体源存在，不能替代正式 SDK Gateway 部署。
