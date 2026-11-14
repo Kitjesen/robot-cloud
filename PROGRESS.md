@@ -4,6 +4,8 @@
 
 **2026-11-14 真实云连接窗口补充：** 设备在窗口开始时可达，`13146` 只读状态为 grounded、输出关闭、控制方 none；通过本机 authorizer 开启后，`doso-cloud-link` active，MQTT TCP 到 `8.153.169.177:8883` established，日志出现 `cloud_connected`。业务同步对该 UUID 返回 `permission:null`，研发库存尚未绑定账号，Gateway 未下发 reporting lease，所以 `status` 与 `status/latest` 仍为 `503 unavailable`。设备随后再次离开局域网，云状态上报、App 读取和关闭回退保持待验收。没有发送运动命令或修改 CAN。[现场证据](artifacts/robot-cloud/real-connect-20261113/real-cloud-activation-20261114.json)
 
+**2026-11-15 开机恢复检查：** 机器狗恢复可达，Brainstem 和 13146 只读状态通过，`choice=true` 已保留。原有 `doso-cloud-link.service` 为 disabled，已执行 `systemctl enable --now`，当前 enabled/active，MQTT TCP 已建立。预检的 USB 映射要求仍是旧路径，当前观察为 `can0→1-1.2`、`can1→1-2.1`、`can2→1-1.3`、`can3→1-1.4`，四路 CAN 实际均 UP/ERROR-ACTIVE/1Mbps。下一步是 App 绑定账号并生成短期 reporting permission，再验证 Gateway/App 状态上报。没有发送运动命令或修改 CAN。[开机证据](artifacts/robot-cloud/real-connect-20261113/cloud-link-enable-20261115.json)
+
 逐项交付审计见 [DELIVERY_AUDIT_20261114.md](docs/DELIVERY_AUDIT_20261114.md)。
 
 本地回归补充：当前工作区 `cargo test --workspace --locked --offline -j 1` 为 94 passed、1 ignored、0 failed，格式检查通过；未执行真机变更。另发现 authorizer ARM64 本地重建 SHA256 与既有部署记录不一致，已暂停制品一致性声明，待机器狗恢复可达后只读核对远端二进制。[哈希审计](artifacts/robot-cloud/real-connect-20261113/authorizer-hash-audit-20261114.json)

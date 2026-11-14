@@ -6,6 +6,19 @@
 
 ## 当前 ARM64 云连接候选（2026-11-12）
 
+### 2026-11-15 开机恢复候选
+
+本轮修正安装入口，让 `doso-cloud-link.service` 在安装后启用开机启动。进程仍读取 `DOSO_CLOUD_ON` 和本地 choice，关闭 choice 仍保持 `cloud_off`，开启 choice 才恢复 MQTT。候选包位于
+`D:\DOSO\artifacts\robot-cloud\releases\20261115-cloud-link-boot-resume\link-aarch64.tar.gz`。
+
+| 项目 | 值 |
+| --- | --- |
+| 二进制 SHA256 | `15a1603fcd3af3feba71d3481e91f481011bfce0b80f141df6015517dd7bea76` |
+| 包 SHA256 | `d3f70a261a14d7a1dd25e0e0bb8ae0cbc2d45cb38628eda7fa2f52759e3708f1` |
+| 默认云连接 | `DOSO_CLOUD_ON=false`，本地 choice 决定运行时连接 |
+| 包自校验 | `sha256sum --check --strict SHA256SUMS` 通过 |
+| 当前真机 | 已直接启用现有 unit，`enabled/active`，MQTT TCP 已建立 |
+
 ### 2026-11-13 远程关闭持久化候选
 
 本轮源码已重新交叉编译为 AArch64 Linux 候选，加入远程 `enabled=false` 持久化本地 `choice=false`、停止采样并断开 cloud-link，以及本地重新开启后的新许可流程。候选包位于

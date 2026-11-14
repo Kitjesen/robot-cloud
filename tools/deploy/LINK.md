@@ -33,7 +33,7 @@ config/env.example / ca.crt / gateway-signing.pub
 systemd/doso-cloud-link.service
 ```
 
-`link.sh` 需要 root、Linux aarch64，检查全部必需文件的校验清单与哈希，拒绝覆盖已有配置目录、二进制或 systemd 单元。脚本创建或复用 `doso-cloud` 系统账户，安装 root 所有的二进制与单元、root 可写且 doso-cloud 组可读的配置和公有材料，最后执行 `systemctl daemon-reload`。安装后的 `agent.env` 保持 `DOSO_CLOUD_ON=false`，服务须在后续步骤手动启动。
+`link.sh` 需要 root、Linux aarch64，检查全部必需文件的校验清单与哈希，拒绝覆盖已有配置目录、二进制或 systemd 单元。脚本创建或复用 `doso-cloud` 系统账户，安装 root 所有的二进制与单元、root 可写且 doso-cloud 组可读的配置和公有材料，最后执行 `systemctl daemon-reload` 并启用开机单元。安装后的 `agent.env` 保持 `DOSO_CLOUD_ON=false`。每次启动仍先检查安装开关和本地 choice，choice 为 false 时退出并保持断云，choice 为 true 时恢复云连接。
 
 若已有安装或脚本中途失败，先检查已安装文件与错误原因。保留现场配置，按维护流程处理部分安装，重复运行仍会拒绝覆盖。
 

@@ -41,4 +41,5 @@ install -o root -g doso-cloud -m 640 config/env.example /etc/doso/robot-cloud/ag
 install -o root -g doso-cloud -m 640 config/ca.crt config/gateway-signing.pub /etc/doso/robot-cloud/agent/
 install -o root -g root -m 644 systemd/doso-cloud-link.service /etc/systemd/system/doso-cloud-link.service
 systemctl daemon-reload
-printf 'Cloud link installed, disabled by configuration. Complete LINK.md before starting it.\n'
+systemctl enable doso-cloud-link.service
+printf 'Cloud link installed and enabled for boot. The persisted local choice still controls connection.\n'

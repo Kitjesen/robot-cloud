@@ -10,6 +10,14 @@
 
 业务 `remote-state-sync` 对该 UUID 返回 `permission:null`。研发库存尚未绑定账号，Gateway 没有下发 `reporting.control`，因此 `POST /status` 和 `GET /status/latest` 仍为 `503 unavailable`。设备随后再次离开局域网，尚未完成许可下发后的 `status.report`、App 读取、远程关闭、重启保持关闭和本地重新开启。该窗口没有发送运动命令或修改 CAN。
 
+## 2026-11-15 开机恢复检查
+
+机器狗重新可达后，Brainstem 和 13146 均恢复。13146 再次读回 `GROUNDED`、电机输出关闭、控制方 `NONE`、无严重电机故障、无 gRPC lease。`choice=true` 和两项云端二进制哈希均匹配，但原有只读 CAN 映射检查因 USB 拓扑变化退出，当前观察为 `can0→1-1.2`、`can1→1-2.1`、`can2→1-1.3`、`can3→1-1.4`，脚本仍要求旧路径。四路 CAN 实际均为 `UP/ERROR-ACTIVE/1Mbps`，没有调整映射。
+
+检查还发现 `doso-cloud-link.service` 原来是 `disabled`，所以 `choice=true` 在重启后没有自动恢复。已执行 `systemctl enable --now doso-cloud-link.service`，当前 unit 为 `enabled/active`，MQTT TCP 已连接。安装脚本已同步修改为安装后启用开机单元，进程仍依据 `DOSO_CLOUD_ON` 和本地 choice 决定是否建立云连接。[开机检查](../artifacts/robot-cloud/real-connect-20261113/cloud-link-reboot-check-20261114.json) · [开机恢复](../artifacts/robot-cloud/real-connect-20261113/cloud-link-enable-20261115.json) · [现场基线](../artifacts/robot-cloud/real-connect-20261113/field-recheck-20261114.json)
+
+本次映射检查失败只表示 USB 路径记录过期，不能据此改写逻辑总线角色。四个 PCAN-USB 没有唯一序列号，后续需要现场确认物理标签后再更新映射。
+
 ## 本轮已验证
 
 | 范围 | 结果 | 说明 |
@@ -20,11 +28,11 @@
 | 本机模拟云链路 | 通过 | `lab check`：许可、签名状态、状态变化、读失败保留旧时间、关闭、过期、重连、视频、本地关闭持久化 |
 | 本机 MQTT 权限 | 9 项通过 | `lab auth-check`：合法证书、无证书、不受信、跨设备、设备控制主题越权和 Gateway 身份检查 |
 | 机器狗到公网 MQTT | TLS 通过 | `8.153.169.177:8883`，TLS 1.3，服务端证书校验通过 |
-| 真实 Gateway 查询 | `503 unavailable`（当前） | 云端登记已启用，真机曾建立 MQTT TCP 会话；业务同步返回 `permission:null`，未下发短期状态许可，未形成 `status.report` |
+| 真实 Gateway 查询 | `503 unavailable`（当前） | 云端登记已启用，真机已恢复 MQTT TCP 会话；业务同步返回 `permission:null`，未下发短期状态许可，未形成 `status.report` |
 | 云端登记变更工具 | 通过 | `render-device-registration.py` 离线校验 UUID v4、重复登记和 ACL 用户；实际 ECS 登记与启用通过阿里云 ECS 云助手完成，见 [启用证据](../artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json) |
 | Gateway 登记路径边界 | 通过 | 拒绝绝对路径、`..` 和其他非普通路径，避免登记文件被篡改后加载登记目录外的公钥；Gateway 27 项测试通过 |
 
-本轮没有发送运动命令、没有使能电机、没有修改 CAN，也没有重启机器狗服务。
+本轮没有发送运动命令、没有使能电机、没有修改 CAN。仅启用了已保存 choice 所需的 cloud-link 开机单元并启动只读云连接。
 
 制品一致性补充：本轮只读预检读取到远端 authorizer SHA256 为 `baddbdb925e5f87067bb510c3b954d2d85c11ec95d51225555f3a5f3524a0e40`，与发布值仅有大小写差异，归一化后匹配；cloud-link SHA256 也匹配。预检脚本已改为大小写不敏感比较，避免再次产生假 mismatch。
 
