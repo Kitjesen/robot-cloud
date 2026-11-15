@@ -1,6 +1,21 @@
 # 接入测试
 
-更新：2026-11-14。本页汇总实际验证和可复现入口；每节按其当次源码、部署与硬件范围解释。当前功能状态及产品顺序见 [PROGRESS.md](PROGRESS.md)，本轮真实机器狗交付记录见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。
+更新：2026-11-15。本页汇总实际验证和可复现入口；每节按其当次源码、部署与硬件范围解释。当前功能状态及产品顺序见 [PROGRESS.md](PROGRESS.md)，本轮真实机器狗交付记录见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。视频四项验收的单独矩阵见 [docs/VIDEO_ACCEPTANCE_20261115.md](docs/VIDEO_ACCEPTANCE_20261115.md)。
+
+## 视频四项验收矩阵（2026-11-15）
+
+视频链路按“能取到 JPEG、能连续取帧、App 能显示、公网能访问”四个门分别记录。合同测试、端口监听和相机 `streaming` 状态只能证明对应前置条件，不能替代画面验收。
+
+| 验收项 | 当前结果 | 已证明的范围 | 仍缺的交付门 |
+| --- | --- | --- | --- |
+| Rust SDK 单帧 JPEG | `PASS_PARTIAL` | 真机 go2rtc relay 经临时只读桥预热后返回有效 JPEG，当前窗口 5/5 | 正式 SDK Gateway `5052` 未监听，冷启动仍可出现 503/零字节超时 |
+| Rust SDK 连续图像流 | `PASS_PARTIAL` | 真实 relay 返回连续 10/10 帧，序号连续且 10/10 唯一 | 仍经过临时桥，未在正式 `5052` 上验证持续流和就绪语义 |
+| App 视频显示 | `PASS_ISOLATED_REAL_DEVICE` | 隔离 x86_64 视频包连接真机 `5050`，原生 WHEP player 收到 track、stats 持续增长，停止后会话释放 | 正式 5052、主 App 控制页、账号/设备选择和后台恢复未验收 |
+| 公网 WebRTC/WHEP | `NOT_DEPLOYED` | `media-test.dosorobotics.com` TLS 可达 | 公网 status/WHEP 路由返回 404，证书链仍非受信 CA，尚未部署 viewer grant、SDP 和 ICE 验收 |
+
+证据、命令入口和限制集中在 [视频链路验收状态](docs/VIDEO_ACCEPTANCE_20261115.md)。当前可以交付的是“局域网真实媒体源 + 隔离接收器”证据，尚不能写成正式 SDK、生产 App 或公网视频已交付。
+
+本轮还修复了真机视频部署中的实际 producer 配置错误：`go2rtc` 原先没有 `cam` stream，恢复后又引用了机端不存在的 `lingtu_camera_webrtc`；现已改用机端已安装的 `lingtu_camera_go2rtc_mpegts.sh`，并在只重启 go2rtc 后通过 WHEP 与 JPEG 复测。修复记录和备份位置见 [video-config-repair-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-config-repair-20261115.json)。
 
 ## 本轮回归（2026-11-14）
 
