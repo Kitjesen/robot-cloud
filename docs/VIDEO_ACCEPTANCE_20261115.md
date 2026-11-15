@@ -6,19 +6,21 @@
 
 | 层次 | 结果 | 证据 | 结论 |
 | --- | --- | --- | --- |
-| Rust SDK 单帧 JPEG | `PASS_PARTIAL` | `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/sdk-camera-acceptance-20261115-go2rtc.json` | 真实 go2rtc relay 经临时只读 gRPC bridge 返回 17,837 字节 JPEG，头尾有效；正式 `5052` 尚未监听 |
-| Rust SDK 连续 JPEG | `PASS_PARTIAL` | 同上 | 收到 10/10 帧，序号 1–10、唯一帧 10/10；冷启动曾出现 5 秒零字节超时 |
+| Rust SDK 单帧 JPEG | `PASS_PARTIAL` | `sdk-camera-acceptance-20261115-go2rtc.json`、`camera-warm-readonly-20261115T013709Z.json` | 真实 relay 经临时只读桥返回有效 JPEG；预热后当前窗口 5/5 成功；正式 `5052` 尚未监听 |
+| Rust SDK 连续 JPEG | `PASS_PARTIAL` | `sdk-camera-acceptance-20261115-go2rtc.json` | 收到 10/10 帧，序号 1–10、唯一帧 10/10；冷启动仍有 503/等待窗口 |
 | App 视频显示 | `NOT_RUN_REAL_DEVICE` | App 视频合同回归 59/59；无本轮正式 App 真机回放证据 | 代码具备 WHEP 接收、解码帧 watchdog、停止/后台清理，但不能把合同测试当作手机画面通过 |
 | 局域网 WebRTC/WHEP | `PASS`（查看器） | `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-webrtc-acceptance-20261115.json` | 真实 LAN 查看器收到 640×480 帧且计数增长；不是公网或正式 App 验收 |
 | 公网 WebRTC/WHEP | `NOT_DEPLOYED` | `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/public-whep-probe-20261115.json` | `media-test.dosorobotics.com` TLS 可达，但 status/WHEP 路由为 404，未发送 viewer 凭据或 SDP |
 
-重复只读请求仍能观察到 relay 冷启动/就绪抖动：5 次请求中 2 次返回 JPEG、3 次 5 秒零字节超时。[窗口证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/relay-retry-window-20261115.json)
+重复只读请求仍能观察到 relay 冷启动/就绪抖动：历史窗口 5 次请求中 2 次返回 JPEG、3 次 5 秒零字节超时。[历史窗口证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/relay-retry-window-20261115.json)
 
 随后用真实 LAN WHEP 查看器预热后，连续 5 次 JPEG 请求全部 HTTP 200，约 26 KB/帧；WHEP 解码计数从 55 增长到 325，丢包为 0。[预热后窗口](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/webrtc-warmup-jpeg-window-20261115.json) 这只能证明“有消费者后稳定”，尚未形成正式 Gateway 的 readiness 语义。
 
+当前只读复核再次得到相同的预热后行为：相机状态 `200/streaming`、约 `29.6 FPS`，连续 5 次快照全部为有效且不同的 JPEG（25,277–25,600 bytes）。[当前窗口](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-warm-readonly-20261115T013709Z.json) 这不改变正式 5052、App 真机与公网 WHEP 的未验收状态。
+
 ## 本轮现场只读观察
 
-机器狗当前可通过 SSH 只读检查到：`13146`、`13148`、HTTP `5050`、go2rtc `1984`、RTSP `8554` 和 ICE `8555` 正在监听；正式 SDK Gateway `5052` 没有监听。相机状态接口报告 `streaming`，go2rtc `api/frame.jpeg?src=cam` 当前可返回 JPEG。这个结果只说明媒体源存在，不能替代正式 SDK Gateway 部署。
+当前窗口可通过 SSH 只读检查到：HTTP `5050`、RTSP `8554` 和 ICE `8555` 正在监听，go2rtc 管理 API 仅绑定机器人回环地址；`13146` 与正式 SDK Gateway `5052` 未监听。相机状态接口报告 `streaming`，LAN WHEP 预热后 `api/frame.jpeg?src=cam` 可返回 JPEG。这个结果只说明独立媒体源存在，不能替代正式 SDK Gateway 部署。
 
 ## 下一步顺序
 
