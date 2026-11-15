@@ -8,6 +8,8 @@
 
 **2026-11-15 视频验收补充：** 机器狗的 Orbbec、go2rtc relay 和局域网 WHEP 查看器已有只读帧证据；Rust SDK 通过临时只读桥收到单帧及连续 10 帧 JPEG，App 视频合同回归为 59/59。正式 SDK Gateway `5052` 仍未监听，手机 App 真机播放和公网 WHEP 路由仍未验收。分层结果与下一步见 [视频链路验收状态](docs/VIDEO_ACCEPTANCE_20261115.md)。
 
+**2026-11-15 部署准备补充：** 通过 SSH 只读维护窗口在机器狗源码 build tree 生成了 `lingtu_gnss_dds` ARM64 候选（未安装、未启动、未改服务）；现有 `lingtu_camera_dds` 已存在。完整 native release 仍缺导航、driver、SLAM、maps 等组件和标准 `install/` 树，正式 `lt-host/5052` 不能由当前 video probe 替代。Rust robot-cloud workspace 本轮 `95 passed, 1 ignored, 0 failed`。[构建记录](../artifacts/robot-cloud/real-connect-20261113/remote-gnss-build-20261115.json) · [部署门](docs/FORMAL_GATEWAY_5052_DEPLOYMENT_20261115.md)
+
 逐项交付审计见 [DELIVERY_AUDIT_20261114.md](docs/DELIVERY_AUDIT_20261114.md)。
 
 本地回归补充：当前工作区 `cargo test --workspace --locked --offline -j 1` 为 94 passed、1 ignored、0 failed，格式检查通过；未执行真机变更。另发现 authorizer ARM64 本地重建 SHA256 与既有部署记录不一致，已暂停制品一致性声明，待机器狗恢复可达后只读核对远端二进制。[哈希审计](artifacts/robot-cloud/real-connect-20261113/authorizer-hash-audit-20261114.json)
