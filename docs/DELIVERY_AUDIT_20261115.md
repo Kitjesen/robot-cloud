@@ -38,6 +38,8 @@ hello → reporting.control → reporting.ack → status.report
       → remote-state-sync → PostgreSQL → App
 ```
 
+本轮补做了公网认证边界探测：未携带 Bearer 的 `/status` 与 `/status/latest` 均返回 `401 Unauthorized`，并带 `WWW-Authenticate: Bearer`；这证明认证边界仍生效，但不能据此推断真实设备在线或拥有 reporting permission。[新鲜边界证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-unauthorized-probe-20261115T033126Z.json)
+
 ## 本地合同回归
 
 执行：
@@ -62,7 +64,7 @@ cargo run --locked --offline -p lab -- check
 
 App 远程状态 Node 回归 `30/30`，Supabase `remote-state-user` 与 `remote-state-sync` Deno 回归 `27/27`。本轮修正了一项过时的 Profile 文案断言，使测试与当前“搜索机器狗 Wi-Fi / 设备接入”界面一致；这不改变真实设备绑定状态。[App/业务回归](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/app-remote-state-regression-20261115.json)
 
-视频和设备接入回归补充：App 设备发现/绑定/多设备合同 `76/76`，机器人连接相关组合回归 `139/139`；视频合同 `59/59`，云端媒体会话合同 `9/9`。本轮只修正了测试夹具断言，没有修改生产连接逻辑或绑定真实账号。[App 接入回归](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/app-connection-regression-20261115.json) · [SDK/媒体回归](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/sdk-regression-20261115.json)
+视频和设备接入回归补充：App 设备发现/绑定/多设备合同 `76/76`，机器人连接相关组合回归 `139/139`；视频合同 `60/60`，云端媒体会话合同 `9/9`。隔离 x86_64 App 视频包已真实进入 `receiving` 并完成停止清理，但正式 5052 和主 App 控制页仍未验收。[App 接入回归](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/app-connection-regression-20261115.json) · [SDK/媒体回归](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/sdk-regression-20261115.json) · [隔离 App 证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/app-video-isolated-acceptance-20261115T031720Z.json)
 
 真机媒体只读预检显示 Orbbec 状态为 `streaming`，go2rtc relay 当前可返回 JPEG；正式 `5052` 未监听，`lt-host` 未安装，所以单帧/连续帧仍只能记为临时桥 `PASS_PARTIAL`。完整分层矩阵见 [视频链路验收状态](VIDEO_ACCEPTANCE_20261115.md)，原始预检见 [real-media-preflight-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-media-preflight-20261115.json)。
 
