@@ -8,6 +8,10 @@
 
 该窗口只证明本机 `13146` 只读 RPC 在 20 秒内稳定；它不证明云端 reporting permission、MQTT 状态上报、Gateway `status/latest`、App 真实状态或正式 SDK `5052`。本次没有调用任何运动、电机、导航、External 或 CAN 配置接口。
 
+## 2026-11-15 云端 Gateway 只读快照
+
+通过已登录的阿里云 ECS 云助手执行只读命令，未输出证书、私钥、Bearer 或 ACL 内容。Gateway、Mosquitto、Nginx 均为 `active/loaded`，443、8130、8883 监听存在；`devices.json`（mode 640，197 bytes）和 MQTT ACL（mode 640，814 bytes）存在。`/etc/doso/robot-cloud/gateway/reporting.json` 返回 `No such file or directory`，因此当前线上 reporting 状态存储缺失。这个结果解释了为何当前 `status`/`status/latest` 仍为 `503 unavailable`，但还不能证明设备登记公钥或线上二进制与源码一致；下一步应由云端部署责任方补齐或核对 reporting 状态存储，再重跑只读投影查询。没有写入线上配置、重启/重载服务或绑定账号。[原始快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-readonly-snapshot-20261115T091644Z.json)
+
 ## 视频四项验收矩阵（2026-11-15）
 
 视频链路按“能取到 JPEG、能连续取帧、App 能显示、公网能访问”四个门分别记录。合同测试、端口监听和相机 `streaming` 状态只能证明对应前置条件，不能替代画面验收。

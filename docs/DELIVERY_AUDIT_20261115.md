@@ -31,6 +31,12 @@
 | 业务库 / App 真实状态 | 尚未证明 |
 | 云端远程运控 | 禁止 |
 
+### 云端只读部署快照（2026-11-15 17:16 CST）
+
+阿里云 ECS 云助手只读结果显示 Gateway、Mosquitto、Nginx 均为 `active/loaded`，443、8130、8883 正常监听；`devices.json` 和 MQTT ACL 存在，但 `/etc/doso/robot-cloud/gateway/reporting.json` 明确缺失。该证据使当前 `503 unavailable` 更可能来自 reporting 状态存储缺失，或线上二进制/配置与当前源码不一致，而不是简单的 MQTT TCP 未建立。[只读快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-readonly-snapshot-20261115T091644Z.json)
+
+本快照没有写入、重载或重启动作，也没有输出密钥或完整 ACL。下一步先由云端部署责任方核对 reporting 状态存储的实际路径、权限和线上制品版本；在此之前不手工伪造 `status.report`，不把端口监听或 MQTT TCP 建立显示为 App 在线。
+
 这不是设备网络失败，而是当前产品归属/许可边界的预期结果。必须先完成研发设备账号绑定，再验证：
 
 ```text
