@@ -1,0 +1,26 @@
+{
+  "recordedAt": "2026-11-15",
+  "sourceBaseline": "36d9d14",
+  "remote": {
+    "path": "/opt/doso/bin/doso-cloud-gateway",
+    "size": 5531064,
+    "mtime": "2026-11-04 00:40:29.003618445 +0800",
+    "sha256": "d4f224aa3fabf41a14491b11574c805c32696e5516357ea7bf79d6276d75e9ab"
+  },
+  "knownLocalArtifacts": [
+    {"label": "2026-11-03 baseline", "sha256": "89b67516a2cc28469f2381ebaabaf1ef6b3f5f9d35c9a992adec5e459e146495"},
+    {"label": "2026-11-08 Linux upload", "sha256": "085f463e5a412a1b974c2a4d8a48cf42aaf83162428d38670382410384d63183"}
+  ],
+  "sourceVerification": {
+    "cargoTest": "cargo test --locked --offline -p doso-cloud-gateway reporting_http_boundaries_and_offline_stop -- --nocapture: 1 passed",
+    "linuxCrossBuild": "not_available_on_this_workstation: x86_64-linux-gnu-gcc and cargo-zigbuild are unavailable",
+    "windowsBuild": "completed_but_not_deployable_to_linux"
+  },
+  "conclusion": {
+    "remoteHashMatchesKnownArtifacts": false,
+    "sourceToRemoteIdentity": "not_proven",
+    "reportingNotFoundSemantics": "current_source_treats_first_start_missing_file_as_empty_state",
+    "nextGate": "produce_and_verify_current_linux_gateway_then_deploy_with_explicit_approval_before_retesting_status_latest",
+    "onlineWritesPerformed": false
+  }
+}

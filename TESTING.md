@@ -10,7 +10,9 @@
 
 ## 2026-11-15 云端 Gateway 只读快照
 
-通过已登录的阿里云 ECS 云助手执行只读命令，未输出证书、私钥、Bearer 或 ACL 内容。Gateway、Mosquitto、Nginx 均为 `active/loaded`，443、8130、8883 监听存在；`devices.json`（mode 640，197 bytes）和 MQTT ACL（mode 640，814 bytes）存在。`/etc/doso/robot-cloud/gateway/reporting.json` 返回 `No such file or directory`，因此当前线上 reporting 状态存储缺失。这个结果解释了为何当前 `status`/`status/latest` 仍为 `503 unavailable`，但还不能证明设备登记公钥或线上二进制与源码一致；下一步应由云端部署责任方补齐或核对 reporting 状态存储，再重跑只读投影查询。没有写入线上配置、重启/重载服务或绑定账号。[原始快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-readonly-snapshot-20261115T091644Z.json)
+通过已登录的阿里云 ECS 云助手执行只读命令，未输出证书、私钥、Bearer 或 ACL 内容。Gateway、Mosquitto、Nginx 均为 `active/loaded`，443、8130、8883 监听存在；systemd drop-in 指定的 `/var/lib/doso-cloud/reporting.json` 尚不存在，但源码 `Reporting::load` 将首次启动的 `NotFound` 解释为空许可状态，不能单独解释 `GET /status/latest` 的 `503`。后续只读检查确认研发 UUID 已 `enabled=true`、公钥文件存在；线上 Gateway 二进制 mtime 为 2026-11-04，早于当前源码基线，当前优先级是核对线上制品/实现版本，再重跑投影查询。没有写入线上配置、重启/重载服务或绑定账号。[路径快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-reporting-path-snapshot-20261115T095940Z.json) · [登记/制品快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-registry-binary-snapshot-20261115T102328Z.json)
+
+当前源码 `reporting_http_boundaries_and_offline_stop` 定向测试 `1/1` 通过，确认首次缺少 reporting 文件时源码不会把它直接当作存储故障。工作站没有 `x86_64-linux-gnu-gcc` 或 `cargo-zigbuild`，Windows release 产物不能部署到 ECS Linux；因此没有上传或替换线上 Gateway。[制品审计](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-binary-audit-20261115.json)
 
 ## 视频四项验收矩阵（2026-11-15）
 

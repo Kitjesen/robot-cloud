@@ -34,8 +34,9 @@
   "conclusion": {
     "gatewayAndBrokerServices": "active",
     "tlsAndMqttListeners": "present",
-    "reportingStateStore": "missing",
-    "statusProjection": "not_available_until_reporting_state_is_readable",
+    "reportingStateStore": "legacy_etc_path_missing_preliminary_check",
+    "statusProjection": "not_conclusive_until_authoritative_state_path_is_checked",
+    "authoritativeFollowup": "cloud-gateway-reporting-path-snapshot-20261115T095940Z.json",
     "writesPerformed": false,
     "secretsPrinted": false
   }

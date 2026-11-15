@@ -1,0 +1,46 @@
+{
+  "capturedAt": "2026-11-15T10:23:28Z",
+  "source": "Aliyun ECS Cloud Assistant",
+  "instanceId": "i-uf6hb2phe34p0mt1xfca",
+  "publicAddress": "8.153.169.177",
+  "scope": "read-only",
+  "configuration": {
+    "DOSO_DEVICE_REGISTRY": "/etc/doso/robot-cloud/gateway/devices.json",
+    "DOSO_GATEWAY_PORT": "8130"
+  },
+  "registry": {
+    "deviceId": "d82a831a-2e86-4b46-975b-3d42473583b7",
+    "enabled": true,
+    "publicKeyPath": "device-d82a831a-2e86-4b46-975b-3d42473583b7-signing.pub",
+    "registryMode": "640",
+    "registryOwner": "root:doso-cloud",
+    "registrySize": 197,
+    "registrySha256": "e656831da2c53cc7fa41205f3861c80195c44d39a2095c595b2528a0395676de"
+  },
+  "publicKey": {
+    "path": "/etc/doso/robot-cloud/gateway/device-d82a831a-2e86-4b46-975b-3d42473583b7-signing.pub",
+    "mode": "640",
+    "owner": "root:mosquitto",
+    "size": 113,
+    "sha256": "20f5237ed515a86c26bcc72405693e0129692d08afc92028a442ca11495854e6"
+  },
+  "binary": {
+    "path": "/opt/doso/bin/doso-cloud-gateway",
+    "mode": "755",
+    "size": 5531064,
+    "mtime": "2026-11-04 00:40:29.003618445 +0800",
+    "sha256": "d4f224aa3fabf41a14491b11574c805c32696e5516357ea7bf79d6276d75e9ab"
+  },
+  "service": {
+    "fragmentPath": "/etc/systemd/system/doso-robot-cloud-gateway.service",
+    "dropInPath": "/etc/systemd/system/doso-robot-cloud-gateway.service.d/doso-sync.conf",
+    "mainPid": 84219
+  },
+  "conclusion": {
+    "registryAndPublicKey": "present_and_enabled",
+    "reportingFile": "absent_but_expected_before_first_persisted_permission",
+    "binaryVersion": "deployed_binary_mtime_predates_current_source_baseline",
+    "writesPerformed": false,
+    "secretsPrinted": false
+  }
+}

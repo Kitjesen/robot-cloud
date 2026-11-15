@@ -33,7 +33,9 @@
 
 ### 云端只读部署快照（2026-11-15 17:16 CST）
 
-阿里云 ECS 云助手只读结果显示 Gateway、Mosquitto、Nginx 均为 `active/loaded`，443、8130、8883 正常监听；`devices.json` 和 MQTT ACL 存在，但 `/etc/doso/robot-cloud/gateway/reporting.json` 明确缺失。该证据使当前 `503 unavailable` 更可能来自 reporting 状态存储缺失，或线上二进制/配置与当前源码不一致，而不是简单的 MQTT TCP 未建立。[只读快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-readonly-snapshot-20261115T091644Z.json)
+阿里云 ECS 云助手只读结果显示 Gateway、Mosquitto、Nginx 均为 `active/loaded`，443、8130、8883 正常监听；systemd drop-in 指定的 `/var/lib/doso-cloud/reporting.json` 尚不存在，但当前源码的 `Reporting::load` 会把首次启动的 `NotFound` 作为空许可状态处理，不能单独解释 `GET /status/latest` 的 `503`。进一步检查确认研发 UUID 已 `enabled=true`，公钥文件存在且线上 Gateway 二进制 mtime 为 2026-11-04，早于当前源码基线；因此下一步是核对线上二进制/实现版本与当前源码，再重跑投影查询。[路径快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-reporting-path-snapshot-20261115T095940Z.json) · [登记/制品快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-registry-binary-snapshot-20261115T102328Z.json)
+
+当前源码的 reporting HTTP 边界定向测试 `1/1` 通过；本工作站缺少 Linux 交叉编译工具，尚未生成/上传替代制品。线上二进制哈希与已知本地发布包均不一致，不能把线上行为当作当前源码行为。[制品审计](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-binary-audit-20261115.json)
 
 本快照没有写入、重载或重启动作，也没有输出密钥或完整 ACL。下一步先由云端部署责任方核对 reporting 状态存储的实际路径、权限和线上制品版本；在此之前不手工伪造 `status.report`，不把端口监听或 MQTT TCP 建立显示为 App 在线。
 
