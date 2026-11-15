@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | Rust SDK 单帧 JPEG | `PASS_PARTIAL` | `sdk-camera-acceptance-20261115-go2rtc.json`、`camera-warm-readonly-20261115T013709Z.json` | 真实 relay 经临时只读桥返回有效 JPEG；预热后当前窗口 5/5 成功；正式 `5052` 尚未监听 |
 | Rust SDK 连续 JPEG | `PASS_PARTIAL` | `sdk-camera-acceptance-20261115-go2rtc.json` | 收到 10/10 帧，序号 1–10、唯一帧 10/10；冷启动仍有 503/等待窗口 |
-| App 视频显示 | `PASS_ISOLATED_REAL_DEVICE` | `app-video-isolated-acceptance-20261115T031720Z.json`；App 视频回归 60/60 | 隔离 x86_64 Android 视频包真实读取 5050、挂载 `whep-native-player` 并进入 `receiving`，停止后当前会话释放；正式 5052 和主 App 控制页仍未验收 |
+| App 视频显示 | `PASS_ISOLATED_REAL_DEVICE` | `app-video-isolated-acceptance-20261115T031720Z.json`；`app-video-contract-regression-20261115T0431Z.json` | 隔离 x86_64 Android 视频包真实读取 5050、挂载 `whep-native-player` 并进入 `receiving`，停止后当前会话释放；正式 5052 和主 App 控制页仍未验收 |
 | 局域网 WebRTC/WHEP | `PASS_CURRENT_WINDOW` | `real-webrtc-acceptance-20261115.json`、`video-config-repair-20261115.json`、`camera-warm-current-20261115T0429Z.json` | 修复机器人 go2rtc producer 后，真实 LAN 查看器收到 640×480 帧且计数增长；不是公网或正式 App 验收 |
 | 公网 WebRTC/WHEP | `NOT_DEPLOYED` | `D:/DOSO/artifacts/robot-cloud/real-connect-20261113/public-whep-probe-20261115.json` | `media-test.dosorobotics.com` TLS 可达，但 status/WHEP 路由为 404，未发送 viewer 凭据或 SDP |
 
