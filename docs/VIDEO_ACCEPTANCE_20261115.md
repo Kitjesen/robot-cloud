@@ -26,6 +26,8 @@
 
 当前窗口可通过 SSH 只读检查到：HTTP `5050`、RTSP `8554` 和 ICE `8555` 正在监听，go2rtc 管理 API 仅绑定机器人回环地址；`13146` 与正式 SDK Gateway `5052` 未监听。相机状态接口报告 `streaming`，LAN WHEP 预热后 `api/frame.jpeg?src=cam` 可返回 JPEG。这个结果只说明独立媒体源存在，不能替代正式 SDK Gateway 部署。
 
+同一窗口的正式 Gateway 只读检查确认 `lt-host.service` inactive、`5052` 未监听，且缺少 `lt-host`/session/env 运行时输入。[正式 Gateway 现场检查](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/formal-gateway-live-check-20261115.json) 因此把后续工作明确为 native release 与 ProductControl session 部署，不再重复对 `5050` probe 做 SDK 端点验收。
+
 ## 下一步顺序
 
 1. 在机器人上部署与当前 LingTu/Brainstem 版本匹配的正式 `lt-host` SDK Gateway，确认 `5052` 的 TLS/API-key/只读方法边界；不启动运动控制路径。
