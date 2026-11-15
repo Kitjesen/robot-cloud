@@ -39,6 +39,8 @@
 
 补充：已通过 WSL2 Ubuntu 生成当前源码 Linux release（ELF x86-64，最高 GLIBC 2.34，SHA256 `eb25d3521246a693e4d769146164da30ccc40562afeed2c47b61766e902fd0ad`）。当前产物尚未上传、安装或重启 ECS；部署动作仍需经过备份、哈希校验和只读回归门。[当前制品 manifest](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-current-linux-build-20261115.json)
 
+部署顺序和回滚条件见 [Gateway 候选部署门](GATEWAY_CANDIDATE_DEPLOYMENT_20261115.md)。
+
 本快照没有写入、重载或重启动作，也没有输出密钥或完整 ACL。下一步先由云端部署责任方核对 reporting 状态存储的实际路径、权限和线上制品版本；在此之前不手工伪造 `status.report`，不把端口监听或 MQTT TCP 建立显示为 App 在线。
 
 这不是设备网络失败，而是当前产品归属/许可边界的预期结果。必须先完成研发设备账号绑定，再验证：
