@@ -8,7 +8,7 @@
 
 **2026-11-15 视频验收补充：** 机器狗的 Orbbec、go2rtc relay 和局域网 WHEP 查看器已有只读帧证据；Rust SDK 通过临时只读桥收到单帧及连续 10 帧 JPEG，App 视频合同回归为 60/60。正式 SDK Gateway `5052` 仍未监听，隔离视频包已完成真机局域网接收，但主 App 控制页和公网 WHEP 路由仍未验收。分层结果与下一步见 [视频链路验收状态](docs/VIDEO_ACCEPTANCE_20261115.md)。
 
-**2026-11-15 视频部署修复：** 新鲜只读复核发现 `/etc/go2rtc/go2rtc.yaml` 的 `cam` producer 先为空，恢复后又引用了机端不存在的 `lingtu_camera_webrtc`。已备份并切换到机端现有的 `lingtu_camera_go2rtc_mpegts.sh`，只重启 `go2rtc.service`；WHEP 201、640×480 解码、连续 5 个有效且不同的 JPEG 均通过。没有改 Brainstem/CAN、电机、运动命令或云连接。[修复证据](artifacts/robot-cloud/real-connect-20261113/video-config-repair-20261115.json)
+**2026-11-15 视频部署修复：** 新鲜只读复核发现 `/etc/go2rtc/go2rtc.yaml` 的 `cam` producer 先为空，恢复后又引用了机端不存在的 `lingtu_camera_webrtc`。已备份并切换到机端现有的 `lingtu_camera_go2rtc_mpegts.py`，只重启 `go2rtc.service`；WHEP 201、640×480 解码、连续 5 个有效且不同的 JPEG 均通过，查看器退出后编码子进程自动回收。没有改 Brainstem/CAN、电机、运动命令或云连接。[最终验收证据](artifacts/robot-cloud/real-connect-20261113/video-producer-pdeath-20261115.json)
 
 **2026-11-15 部署准备补充：** 通过 SSH 只读维护窗口在机器狗源码 build tree 生成了 `lingtu_gnss_dds` ARM64 候选（未安装、未启动、未改服务）；现有 `lingtu_camera_dds` 已存在。完整 native release 仍缺导航、driver、SLAM、maps 等组件和标准 `install/` 树，正式 `lt-host/5052` 不能由当前 video probe 替代。Rust robot-cloud workspace 本轮 `95 passed, 1 ignored, 0 failed`。[构建记录](../artifacts/robot-cloud/real-connect-20261113/remote-gnss-build-20261115.json) · [部署门](docs/FORMAL_GATEWAY_5052_DEPLOYMENT_20261115.md)
 

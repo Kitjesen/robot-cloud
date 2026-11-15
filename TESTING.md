@@ -15,9 +15,9 @@
 
 证据、命令入口和限制集中在 [视频链路验收状态](docs/VIDEO_ACCEPTANCE_20261115.md)。当前可以交付的是“局域网真实媒体源 + 隔离接收器”证据，尚不能写成正式 SDK、生产 App 或公网视频已交付。
 
-本轮还修复了真机视频部署中的实际 producer 配置错误：`go2rtc` 原先没有 `cam` stream，恢复后又引用了机端不存在的 `lingtu_camera_webrtc`；现已改用机端已安装的 `lingtu_camera_go2rtc_mpegts.sh`，并在只重启 go2rtc 后通过 WHEP 与 JPEG 复测。修复记录和备份位置见 [video-config-repair-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-config-repair-20261115.json)。
+本轮还修复了真机视频部署中的实际 producer 配置错误：`go2rtc` 原先没有 `cam` stream，恢复后又引用了机端不存在的 `lingtu_camera_webrtc`；最终改用机端已安装的 `lingtu_camera_go2rtc_mpegts.py`，并在只重启 go2rtc 后通过 WHEP 与 JPEG 复测。修复记录和回收证据见 [video-config-repair-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-config-repair-20261115.json) 与 [video-producer-pdeath-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-producer-pdeath-20261115.json)。
 
-查看器关闭后的资源回收仍需补正式门：本轮发现 go2rtc API 已报 `consumers=[]`，但 root encoder 子进程仍存活并占用 CPU，已做精确运行时清理；详见 [video-producer-cleanup-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-producer-cleanup-20261115.json)。
+查看器关闭后的资源回收已在最终 `.py` producer 窗口通过：`consumers=[]` 且编码子进程退出；早期 `.sh` 遗留和 DELETE 会改配置的事实仍保留在 [video-producer-cleanup-20261115.json](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-producer-cleanup-20261115.json)，正式发布仍需保留 `.py` wrapper 与该回收门。
 
 ## 本轮回归（2026-11-14）
 
