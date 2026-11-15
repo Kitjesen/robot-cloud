@@ -12,7 +12,7 @@
     {"label": "2026-11-08 Linux upload", "sha256": "085f463e5a412a1b974c2a4d8a48cf42aaf83162428d38670382410384d63183"}
   ],
   "sourceVerification": {
-    "cargoTest": "cargo test --locked --offline -p doso-cloud-gateway reporting_http_boundaries_and_offline_stop -- --nocapture: 1 passed",
+    "cargoTest": "cargo test --locked --offline -p doso-cloud-gateway -j 1: 27 passed, 0 failed",
     "linuxCrossBuild": "not_available_on_this_workstation: x86_64-linux-gnu-gcc and cargo-zigbuild are unavailable",
     "windowsBuild": "completed_but_not_deployable_to_linux"
   },
