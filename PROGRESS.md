@@ -6,6 +6,8 @@
 
 当前源码的 Gateway reporting HTTP 边界回归 `1 passed`；本机无法生成可部署的 Linux 新 Gateway（缺少 `x86_64-linux-gnu-gcc` 与 `cargo-zigbuild`），所以没有上传或替换线上制品。[制品审计](artifacts/robot-cloud/real-connect-20261113/cloud-gateway-binary-audit-20261115.json)
 
+随后改用 WSL2 Ubuntu 完成当前源码的 Linux release 构建：ELF x86-64、最高 GLIBC 2.34，SHA256 `eb25d3521246a693e4d769146164da30ccc40562afeed2c47b61766e902fd0ad`。它尚未上传、安装或重启线上 Gateway；下一步是按部署门核对配置备份、上传审批和 `/status/latest` 回归。[当前 Linux 制品](artifacts/robot-cloud/real-connect-20261113/cloud-gateway-current-linux-build-20261115.json)
+
 **2026-11-14 当前交付状态：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。云端只读登记已通过阿里云 ECS 云助手启用（设备 UUID `d82a831a-2e86-4b46-975b-3d42473583b7`，远程运控仍关闭）；机器狗曾通过 authorizer 开启 cloud-link 并建立 MQTT TCP 会话，但研发库存未绑定账号，业务同步返回 `permission:null`，没有形成状态上报。设备随后再次不可达。Rust Gateway 的按需查询和 `status/latest` 投影返回 `503 unavailable`，当前结论是“传输层通过、业务许可和状态投影待完成”。[现场证据](artifacts/robot-cloud/real-connect-20261113/real-cloud-activation-20261114.json) · [查询证据](artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json) · [latest 证据](artifacts/robot-cloud/real-connect-20261113/gateway-latest-20261114.json)
 
 **2026-11-14 真实云连接窗口补充：** 设备在窗口开始时可达，`13146` 只读状态为 grounded、输出关闭、控制方 none；通过本机 authorizer 开启后，`doso-cloud-link` active，MQTT TCP 到 `8.153.169.177:8883` established，日志出现 `cloud_connected`。业务同步对该 UUID 返回 `permission:null`，研发库存尚未绑定账号，Gateway 未下发 reporting lease，所以 `status` 与 `status/latest` 仍为 `503 unavailable`。设备随后再次离开局域网，云状态上报、App 读取和关闭回退保持待验收。没有发送运动命令或修改 CAN。[现场证据](artifacts/robot-cloud/real-connect-20261113/real-cloud-activation-20261114.json)

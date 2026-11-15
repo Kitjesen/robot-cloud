@@ -1,0 +1,25 @@
+{
+  "builtAt": "2026-11-15T18:49:01+08:00",
+  "sourceCommit": "5b022fb",
+  "sourceCodeBaseline": "36d9d14",
+  "buildHost": "WSL2 Ubuntu",
+  "command": "cargo build --locked --release -p doso-cloud-gateway --target-dir target/wsl-gateway",
+  "artifact": {
+    "path": "target/wsl-gateway/release/doso-cloud-gateway",
+    "size": 5511904,
+    "sha256": "eb25d3521246a693e4d769146164da30ccc40562afeed2c47b61766e902fd0ad",
+    "format": "ELF 64-bit LSB pie executable, x86-64, dynamically linked",
+    "glibcMax": "2.34",
+    "buildId": "65d4f79c7bb2607095f935ea3874e03edc28166d"
+  },
+  "comparison": {
+    "remoteSha256": "d4f224aa3fabf41a14491b11574c805c32696e5516357ea7bf79d6276d75e9ab",
+    "matchesRemote": false
+  },
+  "deployment": {
+    "uploaded": false,
+    "installed": false,
+    "serviceRestarted": false,
+    "onlineWrites": false
+  }
+}

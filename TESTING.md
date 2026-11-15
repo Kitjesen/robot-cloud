@@ -14,6 +14,8 @@
 
 当前源码 `reporting_http_boundaries_and_offline_stop` 定向测试 `1/1` 通过，确认首次缺少 reporting 文件时源码不会把它直接当作存储故障。工作站没有 `x86_64-linux-gnu-gcc` 或 `cargo-zigbuild`，Windows release 产物不能部署到 ECS Linux；因此没有上传或替换线上 Gateway。[制品审计](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-binary-audit-20261115.json)
 
+改用 WSL2 Ubuntu 后，当前源码 Linux release 构建通过，产物为 ELF x86-64、最高 `GLIBC_2.34`，SHA256 `eb25d3521246a693e4d769146164da30ccc40562afeed2c47b61766e902fd0ad`。该文件只在本地 `target/wsl-gateway`，未上传或替换 ECS；部署前仍需执行备份、制品校验、配置兼容检查和一次只读 `/status/latest` 回归。[构建 manifest](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-current-linux-build-20261115.json)
+
 ## 视频四项验收矩阵（2026-11-15）
 
 视频链路按“能取到 JPEG、能连续取帧、App 能显示、公网能访问”四个门分别记录。合同测试、端口监听和相机 `streaming` 状态只能证明对应前置条件，不能替代画面验收。
