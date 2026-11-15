@@ -18,6 +18,8 @@
 
 随后对 Gateway 包完整回归：`cargo test --locked --offline -p doso-cloud-gateway -j 1` 为 `27 passed, 0 failed`。这是当前源码合同证据，不替代线上候选部署和真实状态投影验收。
 
+线上 Gateway journal 只读筛选仅返回 `robot_cloud_gateway_listening`，没有 `start_failed`、错误或 reporting 活动日志；这只能证明服务启动，不证明 `status/latest` 投影已工作。[journal 快照](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-gateway-journal-snapshot-20261115.json)
+
 ## 视频四项验收矩阵（2026-11-15）
 
 视频链路按“能取到 JPEG、能连续取帧、App 能显示、公网能访问”四个门分别记录。合同测试、端口监听和相机 `streaming` 状态只能证明对应前置条件，不能替代画面验收。
