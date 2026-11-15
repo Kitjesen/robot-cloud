@@ -13,10 +13,10 @@
 
 ## 必须准备的发布物
 
-1. Linux ARM64 LingTu native release，包含 `bin/`、`lib/`、`etc/`、`share/` 和 Python runtime 依赖；使用 `scripts/deploy/package_native_release.sh` 生成，不在 Windows 直接执行。
+1. Linux ARM64 LingTu native release，包含 `bin/`、`lib/`、`etc/`、`share/` 和 Python runtime 依赖；发布物的 manifest 必须声明 `architecture`、签名字段和 `requiredLibraries` 数组。`requiredLibraries` 是 native 库名称的唯一来源，不能在预检脚本里猜库名。
 2. `/opt/lingtu/current` 双布局发布链接，以及 `lt-host.service`、对应 Product RunPlan 和 `/run/lingtu/session.env`。
 3. gRPC 认证配置：`LINGTU_GRPC_API_KEY`；如启用 TLS，还必须成对配置 `LINGTU_GRPC_TLS_CERT_FILE` 与 `LINGTU_GRPC_TLS_KEY_FILE`。只配置现有 HTTP `LINGTU_API_KEY` 不能证明 gRPC 已鉴权。
-4. 与发布物匹配的 native 库：`liblingtu_nav_client.so`、巡检库、DDS probe、相机/SLAM/地图依赖，以及 Python `grpcio`/`protobuf`/`uvicorn` 等锁定运行环境。
+4. 与发布物匹配的 native 库和 Python runtime 依赖；具体 `.so` 名称由同一 release manifest 的 `requiredLibraries` 声明，不能从本文件复制一份第二清单。
 
 部署前先运行只读 preflight（不会写 `/etc`、启动服务或修改设备）：
 
@@ -28,7 +28,7 @@ python3 scripts/deploy/thunder/verify_gateway_grpc_preflight.py \
   --json
 ```
 
-该检查同时验证 `/opt/lingtu/current` 的关键 native 库、`lt-host.service` 的 ProductControl session 门、aarch64 manifest 签名、独立 `LINGTU_GRPC_API_KEY`、API-key 强制开关以及成对可读的 gRPC TLS 文件。它不会把已有 HTTP `LINGTU_API_KEY` 当成 gRPC 凭据，也不会在没有 session 时自行启动 Host。
+该检查同时验证 `/opt/lingtu/current` 的 manifest 清单库、`lt-host.service` 的 ProductControl session 门、aarch64 manifest 签名、独立 `LINGTU_GRPC_API_KEY`、API-key 强制开关以及成对可读的 gRPC TLS 文件。它不会把已有 HTTP `LINGTU_API_KEY` 当成 gRPC 凭据，也不会在没有 session 时自行启动 Host。对应的离线测试是 `python3 scripts/deploy/thunder/test_verify_gateway_grpc_preflight.py`；Windows 工作站没有 Python 运行时，不能把本地未执行写成通过。
 
 当前发布前置仍未齐：目标机现有 `camera_dds`，本轮已在目标机源码 build tree 生成 `gnss_dds`、`dds_probe` 和 `livox_sdk2_stream`；`doso` driver 构建因目标机缺少 `BrainstemClientConfig.cmake`（0.6）停止。导航、SLAM、maps 等 native 组件和标准 `install/` 树仍未形成；必须在 Linux ARM64 构建机补齐 BrainstemClient 及其余组件后再生成 release。Windows 上的 `bash`/WSL 没有可用发行版和 `rsync`，因此本地 `package_native_release.sh --self-test` 不能作为通过证据。
 
@@ -37,11 +37,11 @@ python3 scripts/deploy/thunder/verify_gateway_grpc_preflight.py \
 ## 安装顺序（维护窗口执行）
 
 1. 只读核对 Brainstem 状态、CAN、当前控制 owner 和电机输出；保存快照。
-2. 校验 release manifest、架构和 SHA256；将 release 放入 `/opt/lingtu/releases/<version>`，原子更新 `current`，不覆盖旧 release。
-3. 安装 catalog unit：
+2. 校验 release manifest、架构和 SHA256；将 release 放入 `/opt/lingtu/releases/<version>`，原子更新 `current`，不覆盖旧 release。release 打包和 `lt-host.service` 安装脚本属于 Linux ARM64/LingTu 发布材料；当前 `robot-cloud` 仓库只提供上述只读 preflight，不伪造缺失的安装脚本。
+3. 安装已审查的 catalog unit：
 
    ```text
-   bash scripts/deploy/thunder/install_services.sh field-cpp
+   bash <LingTu 发布材料>/scripts/deploy/thunder/install_services.sh field-cpp
    ```
 
    该命令安装 `lt-host.service`，但不会把 Host 设置为开机自动启动；ProductControl 负责选择产品并生成 session。

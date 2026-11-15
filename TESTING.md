@@ -2,6 +2,12 @@
 
 更新：2026-11-15。本页汇总实际验证和可复现入口；每节按其当次源码、部署与硬件范围解释。当前功能状态及产品顺序见 [PROGRESS.md](PROGRESS.md)，本轮真实机器狗交付记录见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。视频四项验收的单独矩阵见 [docs/VIDEO_ACCEPTANCE_20261115.md](docs/VIDEO_ACCEPTANCE_20261115.md)。
 
+## 2026-11-15 现场只读状态窗口
+
+机器狗 `192.168.66.64` 当前通过 SSH 公钥可达；`brainstem.service`、`doso-cloud-link.service`、`doso-robot-authorizer.service`、`go2rtc.service` 和 `lt-video-gateway.service` active，`127.0.0.1:13146` 监听，正式 `lt-host/5052` 未部署。使用机器人上已有 Dart 依赖，仅调用 `RobotControl.GetControlStatus`，连续 20 次、每秒一次全部成功（20/20）；所有样本均为 grounded、输出关闭、控制方 none、无严重电机故障、无 gRPC 租约。[原始窗口](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-readonly-status-loop-20261115T0745Z.json)
+
+该窗口只证明本机 `13146` 只读 RPC 在 20 秒内稳定；它不证明云端 reporting permission、MQTT 状态上报、Gateway `status/latest`、App 真实状态或正式 SDK `5052`。本次没有调用任何运动、电机、导航、External 或 CAN 配置接口。
+
 ## 视频四项验收矩阵（2026-11-15）
 
 视频链路按“能取到 JPEG、能连续取帧、App 能显示、公网能访问”四个门分别记录。合同测试、端口监听和相机 `streaming` 状态只能证明对应前置条件，不能替代画面验收。
@@ -31,6 +37,7 @@
 
 - DOSO Rust SDK：124 项通过。
 - robot-cloud workspace：84 项通过、1 项 ignored；无失败。
+- 当前 robot-cloud workspace 回归：95 项通过、1 项 ignored、0 项失败；`cargo fmt --all -- --check` 通过。新增的正式 Gateway 只读预检在目标 Linux 环境运行 2 项通过；Windows 工作站没有 Python 运行时，因此不把本机未执行写成通过。
 - `cargo fmt --all -- --check` 和 workspace Clippy `-D warnings` 通过。
 - `lab check` 和 `lab auth-check` 通过；两者使用本机模拟 Brainstem/Mosquitto，不是真机证据。
 - 真实设备 TLS 到公网 MQTT 的历史探测已通过；云端登记随后已由 ECS 云助手启用为 `enabled=true`，ECS SSH 入口仍未开放。本轮机器狗曾通过 authorizer 开启 cloud-link 并建立 MQTT TCP 会话，但业务许可为空，尚未形成可读 `status.report`。设备随后再次不可达。[启用证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/cloud-assistant-enable-20261114.json) · [本轮证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-cloud-observe-20261114.json)

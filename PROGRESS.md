@@ -1,5 +1,7 @@
 # 云端系统：当前进度与产品推进
 
+**2026-11-15 15:45 CST 现场只读复核：** 机器狗 `192.168.66.64` 当前可达，`brainstem.service`、`doso-cloud-link.service`、`doso-robot-authorizer.service`、`go2rtc.service` 和 `lt-video-gateway.service` active；`127.0.0.1:13146`、`13148` 与视频 `5050` 监听，正式 `lt-host/5052` 仍 inactive/未监听。使用机器人现有 Dart gRPC 客户端对 `127.0.0.1:13146/GetControlStatus` 连续读取 20 次、每秒一次，20/20 成功，均为 grounded、输出关闭、控制方 none、无严重电机故障、无 gRPC 租约。该窗口证明本机只读状态接口短时稳定，不证明 reporting permission、云端 Gateway 投影、正式 `5052` 或 App 可读状态已完成；没有发送运动/电机/CAN 命令。[20 次读取证据](artifacts/robot-cloud/real-connect-20261113/real-readonly-status-loop-20261115T0745Z.json)
+
 **2026-11-14 当前交付状态：** [真实机器狗云连接交付状态](docs/DELIVERY_STATUS_20261113.md)。云端只读登记已通过阿里云 ECS 云助手启用（设备 UUID `d82a831a-2e86-4b46-975b-3d42473583b7`，远程运控仍关闭）；机器狗曾通过 authorizer 开启 cloud-link 并建立 MQTT TCP 会话，但研发库存未绑定账号，业务同步返回 `permission:null`，没有形成状态上报。设备随后再次不可达。Rust Gateway 的按需查询和 `status/latest` 投影返回 `503 unavailable`，当前结论是“传输层通过、业务许可和状态投影待完成”。[现场证据](artifacts/robot-cloud/real-connect-20261113/real-cloud-activation-20261114.json) · [查询证据](artifacts/robot-cloud/real-connect-20261113/gateway-query-20261114.json) · [latest 证据](artifacts/robot-cloud/real-connect-20261113/gateway-latest-20261114.json)
 
 **2026-11-14 真实云连接窗口补充：** 设备在窗口开始时可达，`13146` 只读状态为 grounded、输出关闭、控制方 none；通过本机 authorizer 开启后，`doso-cloud-link` active，MQTT TCP 到 `8.153.169.177:8883` established，日志出现 `cloud_connected`。业务同步对该 UUID 返回 `permission:null`，研发库存尚未绑定账号，Gateway 未下发 reporting lease，所以 `status` 与 `status/latest` 仍为 `503 unavailable`。设备随后再次离开局域网，云状态上报、App 读取和关闭回退保持待验收。没有发送运动命令或修改 CAN。[现场证据](artifacts/robot-cloud/real-connect-20261113/real-cloud-activation-20261114.json)
@@ -11,6 +13,8 @@
 **2026-11-15 视频部署修复：** 新鲜只读复核发现 `/etc/go2rtc/go2rtc.yaml` 的 `cam` producer 先为空，恢复后又引用了机端不存在的 `lingtu_camera_webrtc`。已备份并切换到机端现有的 `lingtu_camera_go2rtc_mpegts.py`，只重启 `go2rtc.service`；WHEP 201、640×480 解码、连续 5 个有效且不同的 JPEG 均通过，查看器退出后编码子进程自动回收。没有改 Brainstem/CAN、电机、运动命令或云连接。[最终验收证据](artifacts/robot-cloud/real-connect-20261113/video-producer-pdeath-20261115.json)
 
 **2026-11-15 部署准备补充：** 通过 SSH 只读维护窗口在机器狗源码 build tree 生成了 `lingtu_gnss_dds` ARM64 候选（未安装、未启动、未改服务）；现有 `lingtu_camera_dds` 已存在。完整 native release 仍缺导航、driver、SLAM、maps 等组件和标准 `install/` 树，正式 `lt-host/5052` 不能由当前 video probe 替代。Rust robot-cloud workspace 本轮 `95 passed, 1 ignored, 0 failed`。[构建记录](../artifacts/robot-cloud/real-connect-20261113/remote-gnss-build-20261115.json) · [部署门](docs/FORMAL_GATEWAY_5052_DEPLOYMENT_20261115.md)
+
+正式 Gateway 预检也已补入 `scripts/deploy/thunder/verify_gateway_grpc_preflight.py`：manifest 的 `requiredLibraries` 是唯一库清单，独立 gRPC key 不能复用 HTTP key，TLS 权限、session 和 `lt-host` 安装状态缺一即失败。该脚本只读，不启动服务、不创建 session；在机器狗 Linux 环境运行配套测试为 2 项通过。正式 native release 和 `lt-host` 仍未形成。
 
 本轮又在同一源码 build tree 生成 `lingtu_dds_probe` 和 `livox_sdk2_stream`；`lingtu_driver` 仅完成 CMake 前置后因目标机缺少 `BrainstemClientConfig.cmake` 0.6 停止。所有构建均未安装、未启动或替换现场服务。[ARM 构建记录](../artifacts/robot-cloud/real-connect-20261113/remote-native-builds-20261115.json)
 
