@@ -20,6 +20,8 @@
 
 修复后的当前窗口：相机状态 `200/streaming`，go2rtc `streams=[cam]`，连续 5 次快照全部为有效且不同的 JPEG（25,941–26,204 bytes）；真实 LAN WHEP 重新通过，首帧约 6.2 秒，10 个 1 秒采样点持续增长，仅记录 1 个丢包。[当前窗口](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/camera-warm-current-20261115T0429Z.json) · [WHEP 证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/real-webrtc-acceptance-20261115.json)。这仍不改变正式 5052、主 App 控制页与公网 WHEP 的未验收状态。
 
+查看器退出后的资源检查又发现 go2rtc 1.9.10 留下了 root encoder 子进程：API 已显示 `consumers=[]`，但 `lingtu_camera_video`/FFmpeg 仍占用约 86% CPU。已删除运行时 `cam` stream 并按精确 PID 清理该次遗留进程；持久化配置和相机 owner 未改。[清理证据](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/video-producer-cleanup-20261115.json) 说明正式媒体部署还缺 producer 生命周期回收门，不能仅用 `consumers=[]` 作为资源释放通过。
+
 隔离 App 真机窗口随后完成：用当前源码构建的 x86_64 `com.doso.robot.videotest`（SHA-256 `fb3dd30079bb1ba9f3e1d9d694fce3e732a8f280346337c1a339db37bc8089a6`）连接 `192.168.66.64:5050`，状态读取成功，原生 `whep-native-player` 挂载并显示 `视频：receiving`；日志观察到 `setRemoteDescription`、`ontrack` 和连续 `getStats`。手动停止回到 `unconfigured`，当前会话 consumer 消失。证据见 [隔离 App 窗口](D:/DOSO/artifacts/robot-cloud/real-connect-20261113/app-video-isolated-acceptance-20261115T031720Z.json)。这只提升“隔离接收器”一层，不代表正式 5052 或主 App 控制页通过。
 
 ## 本轮现场只读观察
