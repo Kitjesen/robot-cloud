@@ -10,6 +10,8 @@
 
 **2026-11-15 部署准备补充：** 通过 SSH 只读维护窗口在机器狗源码 build tree 生成了 `lingtu_gnss_dds` ARM64 候选（未安装、未启动、未改服务）；现有 `lingtu_camera_dds` 已存在。完整 native release 仍缺导航、driver、SLAM、maps 等组件和标准 `install/` 树，正式 `lt-host/5052` 不能由当前 video probe 替代。Rust robot-cloud workspace 本轮 `95 passed, 1 ignored, 0 failed`。[构建记录](../artifacts/robot-cloud/real-connect-20261113/remote-gnss-build-20261115.json) · [部署门](docs/FORMAL_GATEWAY_5052_DEPLOYMENT_20261115.md)
 
+本轮又在同一源码 build tree 生成 `lingtu_dds_probe` 和 `livox_sdk2_stream`；`lingtu_driver` 仅完成 CMake 前置后因目标机缺少 `BrainstemClientConfig.cmake` 0.6 停止。所有构建均未安装、未启动或替换现场服务。[ARM 构建记录](../artifacts/robot-cloud/real-connect-20261113/remote-native-builds-20261115.json)
+
 逐项交付审计见 [DELIVERY_AUDIT_20261114.md](docs/DELIVERY_AUDIT_20261114.md)。
 
 本地回归补充：当前工作区 `cargo test --workspace --locked --offline -j 1` 为 94 passed、1 ignored、0 failed，格式检查通过；未执行真机变更。另发现 authorizer ARM64 本地重建 SHA256 与既有部署记录不一致，已暂停制品一致性声明，待机器狗恢复可达后只读核对远端二进制。[哈希审计](artifacts/robot-cloud/real-connect-20261113/authorizer-hash-audit-20261114.json)
