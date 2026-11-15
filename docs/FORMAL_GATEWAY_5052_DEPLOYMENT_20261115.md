@@ -18,6 +18,18 @@
 3. gRPC 认证配置：`LINGTU_GRPC_API_KEY`；如启用 TLS，还必须成对配置 `LINGTU_GRPC_TLS_CERT_FILE` 与 `LINGTU_GRPC_TLS_KEY_FILE`。只配置现有 HTTP `LINGTU_API_KEY` 不能证明 gRPC 已鉴权。
 4. 与发布物匹配的 native 库：`liblingtu_nav_client.so`、巡检库、DDS probe、相机/SLAM/地图依赖，以及 Python `grpcio`/`protobuf`/`uvicorn` 等锁定运行环境。
 
+部署前先运行只读 preflight（不会写 `/etc`、启动服务或修改设备）：
+
+```bash
+python3 scripts/deploy/thunder/verify_gateway_grpc_preflight.py \
+  --manifest <aarch64-native-release-manifest.json> \
+  --gateway-env /etc/lingtu/gateway.env \
+  --session-file /run/lingtu/session.env \
+  --json
+```
+
+该检查同时验证 `/opt/lingtu/current` 的关键 native 库、`lt-host.service` 的 ProductControl session 门、aarch64 manifest 签名、独立 `LINGTU_GRPC_API_KEY`、API-key 强制开关以及成对可读的 gRPC TLS 文件。它不会把已有 HTTP `LINGTU_API_KEY` 当成 gRPC 凭据，也不会在没有 session 时自行启动 Host。
+
 当前发布前置仍未齐：目标机现有 `camera_dds`，本轮已在目标机源码 build tree 生成 `gnss_dds`、`dds_probe` 和 `livox_sdk2_stream`；`doso` driver 构建因目标机缺少 `BrainstemClientConfig.cmake`（0.6）停止。导航、SLAM、maps 等 native 组件和标准 `install/` 树仍未形成；必须在 Linux ARM64 构建机补齐 BrainstemClient 及其余组件后再生成 release。Windows 上的 `bash`/WSL 没有可用发行版和 `rsync`，因此本地 `package_native_release.sh --self-test` 不能作为通过证据。
 
 另外，现有凭据脚本写入的是 HTTP/MCP 使用的 `LINGTU_API_KEY`；gRPC 服务读取的是独立的 `LINGTU_GRPC_API_KEY` 及 TLS 文件。部署时必须显式生成、安装并验证 gRPC 凭据，不能把 HTTP API key 的存在当成 `5052` 已受保护。
