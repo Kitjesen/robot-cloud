@@ -4,7 +4,7 @@
 
 工程根目录为 `D:\DOSO\robot-cloud`，Cargo workspace 自包含。机器狗云连接、云端Gateway、媒体适配和遥测投递按进程分工，实际部署程度分别见 [PROGRESS.md](PROGRESS.md)。
 
-2026-11-12 权限边界确认：设备凭据只允许自身获准的上报和确认，不授予云端管理权；DOSO云端禁止运动控制、任意gRPC透传及运控隧道。本地SDK保留操控，继续经机端控制权与安全链。云状态源固定为Brainstem `GetControlStatus`，详细规则见 [CONTRACT.md](CONTRACT.md#设备云端与本地-sdk-的权限边界2026-11-12-确认)。本段更新不代表新增部署。
+2026-11-17 按用户新增需求接入远控会话。设备凭据继续限定为自身获准的连接、上报与确认；账号后端核对操作者及设备归属后签发短期远控会话，机端桥通过既有本地 SDK 和控制仲裁执行。云状态源继续固定为 Brainstem `GetControlStatus`。协议与权限定义集中在 [CONTRACT.md](CONTRACT.md)，代码路径和部署范围见 [远控交付](docs/REMOTE_CONTROL_DELIVERY.md)。
 
 ## 进程与目录
 
@@ -23,6 +23,32 @@
 | Brainstem | 独立运行时，拥有本地状态与控制真值、运动和硬件安全责任 |
 
 `cloud/gateway/examples/query.rs` 是可信后端 / 开发电脑使用的 Rust HTTPS 查询示例。`lab` 与查询示例均为开发工具，生产部署只交付对应云连接服务或 Gateway 二进制。目标机器使用最终二进制与配置，编译工具链留在开发或构建环境。
+
+### 机器狗本地服务边界
+
+当前 V1 本地 SDK 直接连接 Brainstem `13145`，不要求安装或启动 `5052`。Brainstem Thunder 默认监听 `13145`，同一进程可提供 `13146` 回环只读状态入口。LingTu `lt-host` 内的 `GatewayModule` 和 `5052` 只作为未来地图、SLAM、导航和任务统一入口保留。
+
+Brainstem 是硬件唯一 owner。它持有 CAN、IMU、关节、电机状态、运动仲裁、控制租约和安全输出。`13145` 是完整底层控制入口，`13146` 只注册 `GetControlStatus`，供机器狗上的云连接进程读取只读状态。云连接进程不持有 `13145` 控制能力。
+
+DOSO SDK Gateway 是可选的高层协议层。它注册 `system`、`motion`、`localization`、`maps`、`navigation`、`observations`、`tasks` 七个 gRPC 服务，通过已有 LingTu owner、driver、SLAM、navd、mapd 和传感器适配器完成请求。Gateway 不打开 CAN，不读取 Brainstem 串口，不创建第二套 IMU/关节采集，不维护另一份运动真相，也不绕过 driver 直接写电机。
+
+部署时必须满足唯一 owner 约束。机器狗上只运行一套 Brainstem 和一套硬件驱动，Gateway 通过现有 owner 访问状态和动作。第二个会打开 CAN、串口或电机输出的控制器属于冲突配置，部署门应拒绝它。Gateway 启动或停止不能替代 Brainstem 生命周期，Brainstem 重启也不能被 Gateway 自动触发。
+
+```text
+外部 DOSO SDK BrainstemClient
+       ↓ gRPC :13145
+Brainstem
+       ↓
+CAN / IMU / 关节 / 电机
+
+可选 DosoClient
+       ↓ gRPC :5052
+LingTu lt-host / GatewayModule
+       ↓ 复用已有领域 owner
+driver / navd / SLAM / mapd / sensor adapters
+       ↓ 唯一硬件执行边界
+doso-cloud-link → Brainstem :13146 → GetControlStatus（只读）
+```
 
 目录归类描述源码职责；安装包内部的 `link/`、`gateway/`、`broker/` 布局和已安装的 `/etc/doso/robot-cloud/agent/agent.env` 属于各自交付合同，保持其现有位置。
 

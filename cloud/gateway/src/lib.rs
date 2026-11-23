@@ -1,8 +1,9 @@
+pub mod control;
 mod http;
 mod reporting;
 mod sync;
 mod video;
-pub use http::app;
+pub use http::{app, app_with_control};
 pub use reporting::Latest;
 pub use sync::{SyncConfig, run_sync};
 

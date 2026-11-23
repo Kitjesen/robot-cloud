@@ -21,8 +21,8 @@ fn decode(bytes: &[u8], now: i64) -> Option<Location> {
     let fix = serde_json::from_slice::<Snapshot>(bytes).ok()?.location?;
     let milliseconds = fix.ts * 1000.0;
     if !milliseconds.is_finite()
-        || milliseconds < (now - 5_000) as f64
-        || milliseconds > (now + 2_000) as f64
+        || milliseconds < (now - 3_000) as f64
+        || milliseconds > (now + 1_000) as f64
     {
         return None;
     }
@@ -69,7 +69,7 @@ mod tests {
         let location = decode(&serde_json::to_vec(&value).unwrap(), NOW).unwrap();
         assert_eq!(location.observed_at, timestamp(NOW - 1234));
         assert_eq!(location.accuracy_m, None);
-        for offset in [-5000, 2000] {
+        for offset in [-3000, 1000] {
             value["location"]["ts"] = json!((NOW + offset) as f64 / 1000.0);
             assert!(decode(&serde_json::to_vec(&value).unwrap(), NOW).is_some());
         }
@@ -83,8 +83,10 @@ mod tests {
             ("fix_type", json!(0)),
             ("fix_type", json!(9)),
             ("accuracy_m", json!(-1)),
-            ("ts", json!((NOW - 5001) as f64 / 1000.0)),
-            ("ts", json!((NOW + 2001) as f64 / 1000.0)),
+            ("ts", json!((NOW - 3001) as f64 / 1000.0)),
+            ("ts", json!((NOW - 4000) as f64 / 1000.0)),
+            ("ts", json!((NOW + 1001) as f64 / 1000.0)),
+            ("ts", json!((NOW + 1500) as f64 / 1000.0)),
         ] {
             let mut value = snapshot();
             value["location"][field] = invalid;

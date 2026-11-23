@@ -11,6 +11,12 @@
 - `/run/lingtu/session.env` 不存在，所以 ProductControl 尚未选择并启动 Host；
 - `13145/13146` Brainstem 及只读云连接保持运行；本轮没有启动 Host。
 
+## 唯一硬件 owner 约束
+
+Brainstem 是机器狗的唯一 CAN、串口、IMU、关节和电机输出 owner。`lt-host`/Gateway 只提供 DOSO 七域 gRPC 服务，并调用已有 LingTu owner、driver、SLAM、navd、mapd 和传感器适配器。它不得打开第二套硬件连接、创建第二个 Brainstem、直接写 CAN 或维护独立运动状态。
+
+启动 `lt-host` 与 `13145` 同时存在是预期部署形态。部署前必须确认没有第二个会打开 CAN、串口或电机输出的控制进程。`13146` 只读入口继续由 Brainstem 提供，`doso-cloud-link` 仅使用它读取 `GetControlStatus`。
+
 ## 必须准备的发布物
 
 1. Linux ARM64 LingTu native release，包含 `bin/`、`lib/`、`etc/`、`share/` 和 Python runtime 依赖；发布物的 manifest 必须声明 `architecture`、签名字段和 `requiredLibraries` 数组。`requiredLibraries` 是 native 库名称的唯一来源，不能在预检脚本里猜库名。
@@ -36,7 +42,7 @@ python3 scripts/deploy/thunder/verify_gateway_grpc_preflight.py \
 
 ## 安装顺序（维护窗口执行）
 
-1. 只读核对 Brainstem 状态、CAN、当前控制 owner 和电机输出；保存快照。
+1. 只读核对 Brainstem 状态、CAN、当前控制 owner 和电机输出，确认没有第二个硬件 owner；保存快照。
 2. 校验 release manifest、架构和 SHA256；将 release 放入 `/opt/lingtu/releases/<version>`，原子更新 `current`，不覆盖旧 release。release 打包和 `lt-host.service` 安装脚本属于 Linux ARM64/LingTu 发布材料；当前 `robot-cloud` 仓库只提供上述只读 preflight，不伪造缺失的安装脚本。
 3. 安装已审查的 catalog unit：
 

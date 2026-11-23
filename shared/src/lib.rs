@@ -12,6 +12,7 @@ use rumqttc::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{env, fs, time::Duration};
 
+pub mod control;
 pub mod reporting;
 pub mod status;
 pub mod video;

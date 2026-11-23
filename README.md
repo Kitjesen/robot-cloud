@@ -4,6 +4,8 @@
 
 独立 Rust 工程位于 `D:\DOSO\robot-cloud`，源码按运行位置组织：`robot/` 运行在机器狗 Linux 主机，`cloud/` 部署到云服务器，`shared/` 编译进两端，`tools/` 放开发联调与部署工具。
 
+2026-11-17 新增账号授权的远控会话、双向 gRPC 中继和机端 Rust SDK 桥，首版支持 Claim、Hold、Release。完整代码路径、配置与交付顺序见 [远控交付](docs/REMOTE_CONTROL_DELIVERY.md)。本地组合验证使用 `cargo run --locked --offline -p lab -- control-check`，设备侧 Motion 为模拟实现，正式部署与真机结果维护在 PROGRESS.md 和 TESTING.md。
+
 ```text
 robot-cloud/
 ├── robot/                机器狗端：doso-cloud-link
@@ -69,7 +71,7 @@ GPS地图、实时跟随、日期轨迹和摘要卡见 [TRACKS.md](docs/TRACKS.m
 
 ## 启动与测试
 
-在工程根目录运行。开发需要 Rust、Mosquitto 2.1.x 及 OpenSSL，Windows 工具路径见 [TESTING.md](TESTING.md)。
+在工程根目录运行。当前机端与 lab 需要 Rust 1.94、protoc，状态模拟链还需要 Mosquitto 2.1.x 及 OpenSSL，Windows 工具路径见 [TESTING.md](TESTING.md)。
 
 ```powershell
 cargo build --locked -p doso-cloud-link -p doso-cloud-gateway

@@ -2,18 +2,24 @@
 name = "lab"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.94"
 publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+ed25519-dalek.workspace = true
+doso-sdk.workspace = true
+doso-cloud-link = { path = "../../robot" }
+doso-cloud-gateway = { path = "../../cloud/gateway" }
 axum.workspace = true
 prost.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 robot-cloud-common = { path = "../../shared" }
 serde.workspace = true
 serde_json.workspace = true
+rumqttc.workspace = true
 tokio.workspace = true
-tonic.workspace = true
+tonic = { workspace = true, features = ["tls-native-roots", "tls-ring"] }
 tonic-prost.workspace = true
 uuid.workspace = true
+url.workspace = true

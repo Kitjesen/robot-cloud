@@ -17,8 +17,11 @@ serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 tower.workspace = true

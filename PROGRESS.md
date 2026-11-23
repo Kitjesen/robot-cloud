@@ -1,5 +1,35 @@
 # 云端系统：当前进度与产品推进
 
+## 2026-11-18 本地 SDK 直连 Brainstem
+
+当前产品路径收敛为 `App / 本地 Rust 程序 → BrainstemClient → 13145`，不要求部署独立 `5052`。Rust SDK 已实现状态、Profile、电压、电机状态、IMU/关节流、控制权租约、站坐、速度、External 和电机门操作；新客户端已对真机 `192.168.66.64:13145` 完成只读复核。控制动作、External 输出、15 分钟长稳仍待现场验收。`13146` 继续只供 `doso-cloud-link` 读取 `GetControlStatus`，云端不获得 `13145` 控制权。七域 `5052` Gateway 只作为未来地图、SLAM、导航和任务入口保留。
+
+## 2026-11-18 Brainstem 与 SDK Gateway 分层核对
+
+确认 Brainstem 与可选 DOSO SDK Gateway 不抢端口，也不应重复拥有硬件。Brainstem Thunder 是唯一 CAN、IMU、关节、电机状态、运动仲裁和安全输出 owner，默认主入口为 `13145`，`13146` 只读入口只提供 `GetControlStatus`。LingTu `lt-host` 内的 GatewayModule 提供对外七域 gRPC `5052`，调用已有 owner，不打开第二套串口/CAN、不采集第二份传感器状态、不绕过 driver 写电机。现场 2026-11-18 02:51 CST 仍为 `13145` 监听、`lt-host` inactive、`5052` 未监听。部署约束已写入 [架构](ARCHITECTURE.md) 和 [5052 部署门](docs/FORMAL_GATEWAY_5052_DEPLOYMENT_20261115.md)。
+
+## 2026-11-17 GPS 本地 SDK 与云上报
+
+复用已有 `localization().location()`、1Hz `watch_location()` 和云状态 `location` 消息。cloud-link 的位置有效期已对齐 SDK，最多3秒旧、允许时钟超前1秒。SDK 示例现先单次查询再订阅，GPS 无定位、过期和恢复都有可运行入口。云端下发的三类 MQTT 消息、位置字段、完整调用链和配置集中说明在 [GNSS 接入](docs/GNSS.md)。
+
+SDK 3 项、LingTu Gateway 21 项和 C++ 快照检查通过。真实 Python Gateway 到 Rust SDK 示例完成5样本状态切换。真实 Rust cloud-link、TLS MQTT 和 Gateway 的本地 lab 已验证位置保真、过期和失锁后新报告省略位置，输入使用模拟 GNSS 与 Brainstem。测试记录见 [TESTING.md](TESTING.md#2026-11-17-gps-接口与上传验证)。
+
+真机只读检查显示 GNSS 进程及快照缺失，正式 SDK `5052` 与本机状态 `13146` 均未监听。当前 GPS 上传依赖成功读取 `13146`。用户已确认使用独立 GPS/RTK 接收机，型号与接口待补充。RM500U-CNV 的三条 QGPS 查询返回 `+CME ERROR: 4`。真实 fix、机端安装和云端读回仍待验收。
+
+## 2026-11-17 远控接入代码与产品交付
+
+新增共享 gRPC 远控协议、签名设备挑战与短期会话、Gateway 双向流中继和撤销、机端 Rust SDK 桥，以及 App 账号创建/关闭会话的业务入口。当前动作包括 Claim、Hold、Release。完整代码路径、调用方式、部署配置和产品验收顺序集中在 [远控交付](docs/REMOTE_CONTROL_DELIVERY.md)。
+
+组合 lab 已通过真实 HTTP/gRPC/机端桥/锁定 SDK 至模拟 Motion 的持权、空闲释放、延迟首条指令、空闲后显式重新申请与断链检查。工作区 116 项通过、1 项原有 ignored；补公钥轮换后最终 Gateway 39 项通过。账号函数和 App service 各 6 项通过，完整 App 类型检查和最终 Clippy 通过。原始记录见 TESTING.md。真实设备安装、App 原生远控流与操作界面、速度输入窗口贯通、在途归属变更主动撤销和公网真机验收继续推进。
+
+00:49 CST 蜂窝复核已读取 SIM READY、中国广电 5G SA/N28 本地注册及模块 CID 11 激活。主机 `usb0` 仍 DOWN、无 IP，当前出口仍是 Wi-Fi。机端正式 `5052` 与 `13146` 在 00:41 CST 快照均未监听，Brainstem 主 `13145` 和 authorizer `13148` 可见。[蜂窝原始字段](../artifacts/robot-cloud/real-connect-20261113/cellular-verification-20261117.json)
+
+## 2026-11-16 蜂窝复核与远程功能需求
+
+真实机器狗 `192.168.66.64` SSH 可达。22:12 CST 曾枚举到 RM500U-CNV；22:43 CST 的新启动窗口中，USB/PCI 均未枚举到该模块，`usb0` 消失，默认路由走 Wi-Fi。SIM、4G/5G 注册和蜂窝数据连接均待模块恢复后验证。串口设备号已有重用，后续须按 USB 身份发现端口。[现场验收](TESTING.md#2026-11-16-蜂窝模块现场复核)
+
+用户本次新增远程 OTA 和远程控制需求。当前部署能力仍为既有只读云链。OTA 源码已有发布与本机安装基础，云任务领取/结果回传、自动执行恢复、真实 Brainstem 槽位入口及 App 实际 API 尚待接通；真机标准路径未发现 OTA agent。远控后续需增加用户授权会话和机端控制桥，复用本地 Teleop 的持权、50Hz 输入和断联停止。该方向尚未写入现行协议或部署，可先利用 Wi-Fi 进行远端联调，再做蜂窝网络验收。
+
 **2026-11-15 15:45 CST 现场只读复核：** 机器狗 `192.168.66.64` 当前可达，`brainstem.service`、`doso-cloud-link.service`、`doso-robot-authorizer.service`、`go2rtc.service` 和 `lt-video-gateway.service` active；`127.0.0.1:13146`、`13148` 与视频 `5050` 监听，正式 `lt-host/5052` 仍 inactive/未监听。使用机器人现有 Dart gRPC 客户端对 `127.0.0.1:13146/GetControlStatus` 连续读取 20 次、每秒一次，20/20 成功，均为 grounded、输出关闭、控制方 none、无严重电机故障、无 gRPC 租约。该窗口证明本机只读状态接口短时稳定，不证明 reporting permission、云端 Gateway 投影、正式 `5052` 或 App 可读状态已完成；没有发送运动/电机/CAN 命令。[20 次读取证据](artifacts/robot-cloud/real-connect-20261113/real-readonly-status-loop-20261115T0745Z.json)
 
 **2026-11-15 17:16–18:23 CST 云端只读快照：** 阿里云 ECS 云助手确认 Gateway、Mosquitto 和 Nginx active，443/8130/8883 监听正常；systemd drop-in 的权威 reporting 路径 `/var/lib/doso-cloud/reporting.json` 尚不存在，但源码 `Reporting::load` 对首次启动的 `NotFound` 会按空许可状态处理，因此这本身不是 `GET /status/latest` 503 的充分原因。进一步确认研发 UUID 已 `enabled=true`、公钥文件存在且路径匹配；线上 Gateway 二进制 mtime 为 2026-11-04，早于当前 11月13日源码基线，需核对线上制品版本/实现后再解释 503。没有修改线上文件、重载服务、绑定账号或输出密钥。[reporting 路径快照](artifacts/robot-cloud/real-connect-20261113/cloud-gateway-reporting-path-snapshot-20261115T095940Z.json) · [登记/制品快照](artifacts/robot-cloud/real-connect-20261113/cloud-gateway-registry-binary-snapshot-20261115T102328Z.json)

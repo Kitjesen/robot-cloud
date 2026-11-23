@@ -1,0 +1,21 @@
+[Unit]
+Description=DOSO OTA agent
+After=network-online.target doso-brainstem.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+CPUAffinity=0 1 2 3
+EnvironmentFile=/etc/doso/robot-cloud/ota/ota.env
+ExecStart=/usr/local/lib/doso-ota/doso-ota serve
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/opt/doso /ota /var/lib/doso-ota /run/doso
+
+[Install]
+WantedBy=multi-user.target
