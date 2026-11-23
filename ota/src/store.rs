@@ -133,8 +133,13 @@ impl ServiceRestarter for SystemdRestarter {
         if std::env::var("DOSO_OTA_SKIP_RESTART").as_deref() == Ok("1") {
             return Ok(());
         }
+        // Clear any prior failed/start-limit state (e.g., after a broken release crash loop)
+        // so rollback unconditionally revives the service.
+        let _ = Command::new("systemctl")
+            .args(["reset-failed", "--", unit])
+            .status();
         let status = Command::new("systemctl")
-            .args(["try-restart", "--no-block", "--", unit])
+            .args(["restart", "--no-block", "--", unit])
             .status()
             .context("systemctl_restart")?;
         ensure!(status.success(), "brainstem_restart_failed");

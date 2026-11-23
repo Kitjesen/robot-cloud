@@ -13,7 +13,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
@@ -177,6 +177,84 @@ pub struct AndroidAppLatestResponse {
     pub published_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicePolicyInfo {
+    pub name: String,
+    #[serde(default)]
+    pub sha256: String,
+    #[serde(default, alias = "warmup_us")]
+    pub warmup_us: u64,
+    #[serde(default, alias = "golden_steps")]
+    pub golden_steps: usize,
+    #[serde(default, alias = "golden_max_err")]
+    pub golden_max_err: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRtLoopInfo {
+    #[serde(default, alias = "max_tick_us")]
+    pub max_tick_us: u64,
+    #[serde(default, alias = "max_jitter_us")]
+    pub max_jitter_us: u64,
+    #[serde(default, alias = "max_mutex_wait_us")]
+    pub max_mutex_wait_us: u64,
+    #[serde(default)]
+    pub ticks: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceStatusReportRequest {
+    #[serde(default, alias = "boot_id")]
+    pub boot_id: Option<String>,
+    #[serde(default, alias = "firmware_version", alias = "version")]
+    pub firmware_version: Option<String>,
+    #[serde(default, alias = "release_id")]
+    pub release_id: Option<String>,
+    #[serde(default, alias = "brainstem_ready")]
+    pub brainstem_ready: bool,
+    #[serde(default, alias = "strategy_ready")]
+    pub strategy_ready: bool,
+    #[serde(default, alias = "can_read_only")]
+    pub can_read_only: bool,
+    #[serde(default, alias = "active_profile")]
+    pub active_profile: Option<String>,
+    #[serde(default)]
+    pub slots: BTreeMap<String, String>,
+    #[serde(default)]
+    pub policies: Vec<DevicePolicyInfo>,
+    #[serde(default, alias = "rt_loop", skip_serializing_if = "Option::is_none")]
+    pub rt_loop: Option<DeviceRtLoopInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceStatusRecord {
+    pub device_id: String,
+    pub reported_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_age_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_id: Option<String>,
+    pub brainstem_ready: bool,
+    pub strategy_ready: bool,
+    pub can_read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<String>,
+    #[serde(default)]
+    pub slots: BTreeMap<String, String>,
+    #[serde(default)]
+    pub policies: Vec<DevicePolicyInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rt_loop: Option<DeviceRtLoopInfo>,
+}
+
 #[derive(Clone)]
 struct AppState {
     config: Config,
@@ -197,7 +275,16 @@ pub fn build_router(config: Config) -> Result<Router> {
     Ok(Router::new()
         .route("/health", get(health))
         .route("/v1/apps/android/latest", get(android_app_latest))
-        .route("/v1/apps/android/releases", post(publish_android_app_release))
+        .route(
+            "/v1/apps/android/releases",
+            post(publish_android_app_release),
+        )
+        .route("/v1/devices/status", get(list_device_statuses))
+        .route("/v1/devices/{device_id}/status", get(read_device_status))
+        .route(
+            "/v1/agent/devices/{device_id}/status",
+            post(agent_report_device_status),
+        )
         .route("/v1/devices/{device_id}/firmware/releases", get(releases))
         .route("/v1/devices/{device_id}/firmware/jobs", post(start_job))
         .route(
@@ -242,8 +329,9 @@ fn validate_channel(channel: &str) -> Result<&str> {
     ensure!(
         !c.is_empty()
             && c.len() <= 32
-            && c.chars()
-                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_')),
+            && c.chars().all(|ch| ch.is_ascii_lowercase()
+                || ch.is_ascii_digit()
+                || matches!(ch, '-' | '_')),
         "channel_invalid"
     );
     Ok(c)
@@ -268,10 +356,7 @@ fn load_android_app_release(
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
-fn persist_android_app_release(
-    root: &FsPath,
-    release: &AndroidAppReleaseTemplate,
-) -> Result<()> {
+fn persist_android_app_release(root: &FsPath, release: &AndroidAppReleaseTemplate) -> Result<()> {
     let path = android_app_release_path(root, &release.channel);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -369,6 +454,143 @@ async fn publish_android_app_release(
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
     }
     (StatusCode::OK, Json(template)).into_response()
+}
+
+fn validate_device_id(device_id: &str) -> Result<&str> {
+    let id = device_id.trim();
+    ensure!(
+        !id.is_empty()
+            && id.len() <= 128
+            && !id.contains("..")
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+        "device_id_invalid"
+    );
+    Ok(id)
+}
+
+fn device_status_path(root: &FsPath, device_id: &str) -> PathBuf {
+    root.join("status").join(format!("{device_id}.json"))
+}
+
+fn persist_device_status(root: &FsPath, record: &DeviceStatusRecord) -> Result<()> {
+    let directory = root.join("status");
+    fs::create_dir_all(&directory)?;
+    let path = device_status_path(root, &record.device_id);
+    let temp = directory.join(format!("{}.{}.tmp", record.device_id, Uuid::new_v4()));
+    fs::write(&temp, serde_json::to_vec_pretty(record)?)?;
+    let file = fs::OpenOptions::new().read(true).write(true).open(&temp)?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(error) = fs::rename(&temp, &path) {
+        if error.kind() != std::io::ErrorKind::PermissionDenied || !path.exists() {
+            let _ = fs::remove_file(&temp);
+            return Err(error.into());
+        }
+        fs::remove_file(&path)?;
+        fs::rename(&temp, &path)?;
+    }
+    Ok(())
+}
+
+fn load_device_status(root: &FsPath, device_id: &str) -> Result<Option<DeviceStatusRecord>> {
+    let path = device_status_path(root, device_id);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let mut rec: DeviceStatusRecord = serde_json::from_slice(&fs::read(&path)?)?;
+    rec.last_seen_age_ms = Some(now_ms().saturating_sub(rec.reported_at_ms).max(0));
+    Ok(Some(rec))
+}
+
+async fn agent_report_device_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+    Json(report): Json<DeviceStatusReportRequest>,
+) -> Response {
+    if let Err(response) = authorize(&headers, &state.config) {
+        return *response;
+    }
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    match lookup_enabled_device(&state.config.device_registry, &clean_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "device_not_found"),
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+    let record = DeviceStatusRecord {
+        device_id: clean_id,
+        reported_at_ms: now_ms(),
+        last_seen_age_ms: Some(0),
+        boot_id: report.boot_id,
+        firmware_version: report.firmware_version,
+        release_id: report.release_id,
+        brainstem_ready: report.brainstem_ready,
+        strategy_ready: report.strategy_ready,
+        can_read_only: report.can_read_only,
+        active_profile: report.active_profile,
+        slots: report.slots,
+        policies: report.policies,
+        rt_loop: report.rt_loop,
+    };
+    if let Err(error) = persist_device_status(&state.config.root, &record) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    (StatusCode::OK, Json(record)).into_response()
+}
+
+async fn read_device_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+) -> Response {
+    if let Err(response) = authorize(&headers, &state.config) {
+        return *response;
+    }
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    match load_device_status(&state.config.root, &clean_id) {
+        Ok(Some(rec)) => (StatusCode::OK, Json(rec)).into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "device_status_not_found"),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn list_device_statuses(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize(&headers, &state.config) {
+        return *response;
+    }
+    let directory = state.config.root.join("status");
+    let mut items = Vec::new();
+    if directory.exists() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(e) => e,
+            Err(error) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        };
+        let now = now_ms();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(&path)
+                && let Ok(mut rec) = serde_json::from_slice::<DeviceStatusRecord>(&bytes)
+            {
+                rec.last_seen_age_ms = Some(now.saturating_sub(rec.reported_at_ms).max(0));
+                items.push(rec);
+            }
+        }
+    }
+    items.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+    (StatusCode::OK, Json(items)).into_response()
 }
 
 async fn releases(
@@ -1368,5 +1590,101 @@ mod tests {
         .unwrap();
         assert!(!cur_resp.update_available);
         assert!(!cur_resp.force_update);
+    }
+
+    #[tokio::test]
+    async fn device_status_and_policy_inventory_roundtrip_works() {
+        let dir = TestDir::new();
+        let (config, _key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "SUNRISE-S100P-RUST-013": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true }
+            }),
+            base_template_manifest("rel-1", 0, 0),
+            "firmware/qa/rel-1/brainstem.tar.gz",
+            "rel-1",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        let report_body = serde_json::to_vec(&serde_json::json!({
+            "bootId": "boot-001",
+            "firmwareVersion": "v0.0.1",
+            "releaseId": "v0.0.1",
+            "brainstemReady": true,
+            "strategyReady": true,
+            "canReadOnly": true,
+            "activeProfile": "flat_w5",
+            "slots": { "flat": "flat_w5", "stairs": "stairs_cts_v39" },
+            "policies": [
+                { "name": "flat_w5", "sha256": "abc123", "warmupUs": 45, "goldenSteps": 1, "goldenMaxErr": 0.0 }
+            ],
+            "rtLoop": { "maxTickUs": 50, "maxJitterUs": 75, "maxMutexWaitUs": 0, "ticks": 1000 }
+        }))
+        .unwrap();
+
+        let r_post = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/agent/devices/SUNRISE-S100P-RUST-013/status")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(report_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_post.status(), StatusCode::OK);
+
+        let r_get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/SUNRISE-S100P-RUST-013/status")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_get.status(), StatusCode::OK);
+        let rec: DeviceStatusRecord = serde_json::from_slice(
+            &axum::body::to_bytes(r_get.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rec.firmware_version.as_deref(), Some("v0.0.1"));
+        assert_eq!(rec.active_profile.as_deref(), Some("flat_w5"));
+        assert_eq!(
+            rec.slots.get("stairs").map(String::as_str),
+            Some("stairs_cts_v39")
+        );
+        assert_eq!(rec.policies.len(), 1);
+        assert!(rec.last_seen_age_ms.is_some());
+
+        let r_list = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/status")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_list.status(), StatusCode::OK);
+        let list: Vec<DeviceStatusRecord> = serde_json::from_slice(
+            &axum::body::to_bytes(r_list.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].device_id, "SUNRISE-S100P-RUST-013");
     }
 }
