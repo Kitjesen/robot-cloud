@@ -1,4 +1,4 @@
-# Robot cloud read-only v1
+# Robot cloud protocols
 
 Documentation reviewed on 2026-11-08. This document defines wire behavior and
 explicitly marked product targets. Current delivery status is maintained in
@@ -11,7 +11,39 @@ explicitly marked product targets. Current delivery status is maintained in
 
 设备凭据仅用于该设备获准的上报、请求应答与执行确认，不授予云端设备归属、用户授权、告警规则、平台配置或其他设备的管理权。云端服务凭据、管理 Bearer、平台映射及投递队列元数据不进入设备程序或客户公开响应。
 
-云端禁止运动控制：不得通过云状态链、通用 RPC、代理或隧道转发站坐、速度、电机使能、关节目标及控制器切换。已有云状态请求仅允许严格定义的 `status.read`，机端固定调用 `GetControlStatus`；媒体观看沿用独立许可，不能附带运动方法。合法云端签名或服务凭据也不改变该范围。本地 Rust SDK 保留运动、导航与外部控制器接口，继续经过机端控制权、就绪和安全链。
+2026-11-17 用户新增远程控制需求。云状态请求继续只允许 `status.read`，机端固定调用 `GetControlStatus`。远程操控通过下文独立的用户授权会话接入本地 Motion / Teleop，经过现有控制权、就绪与安全链。状态许可、视频许可和服务级 Bearer 各自保留原职责。
+
+### Remote control sessions (2026-11-17)
+
+The first implementation supports typed `Claim`, `Hold` and `Release` actions.
+`shared/proto/control.proto` is the canonical relay schema. A cloud session lasts
+at most 30 seconds and is bound to the operator, device, authorization epoch,
+current device connection and session UUID. The authenticated account backend
+creates or revokes a session through the service-authenticated Gateway API.
+Clients receive the signed grant, while the service credential stays server-side.
+
+The robot opens `RemoteControl.DeviceLink`, receives a fresh server challenge,
+and signs a `control.hello` proof with its enrolled device key. The cloud checks
+the registry and signature before accepting that connection. A new connection
+has a new connection UUID. Disconnecting either the robot or the operator ends
+the corresponding session. Reconnecting requires a new account-authorized grant.
+
+`RemoteControl.Operate` accepts the signed grant as its first message and then
+typed inputs with the same session UUID and increasing sequence. The cloud and
+robot enforce expiry and reject replayed or cross-session input. Device replies
+carry the corresponding input sequence and the local SDK admission result.
+Cloud acceptance alone does not establish native control ownership.
+
+The robot bridge calls the pinned Rust SDK's `Motion.Teleop` implementation.
+Session expiry, revocation and transport loss close the local Teleop stream.
+The existing native authority expiry and final-output barrier remain authoritative.
+Current first-stage wire messages provide no velocity or motor-target payload.
+Velocity support requires preserving the robot input window at the operator's
+sample time before that payload can be added.
+
+The new entry is enabled only when its control listener and robot control URL
+are configured. Production account/ownership integration, TLS routing, ARM64
+installation and physical acceptance are tracked in PROGRESS.md and TESTING.md.
 
 普通客户获得设备身份、业务状态、已授权位置/历史和自身操作结果；不公开平台设备映射、归属版本、许可版本、投递队列计数、内部端点与运行配置。分页一致性、请求结果核查及机端并发切换所需的不透明标识是协议用途，不作为客户设置或界面信息。删除技术元数据时必须保留实际并发校验、断段、取消及未知提交语义。
 
@@ -277,8 +309,8 @@ optional `location` object containing `lat`, `lon`, `fix_type`, `ts` (Unix
 seconds), and `accuracy_m`. Invalid fixes, serial timeouts and errors clear the
 location; refreshing diagnostics must not refresh the fix timestamp. The default
 file is `/dev/shm/lingtu/gnss_status.json`, overridden by `DOSO_GNSS_STATUS`.
-Cloud link attaches only a valid location at most five seconds old (allowing the
-existing two-second future clock tolerance). Missing, malformed, stale or
+Cloud link attaches only a valid location at most three seconds old (allowing a
+one-second future clock tolerance), matching the local SDK location service. Missing, malformed, stale or
 unavailable GNSS omits location and does not suppress the control-state report.
 Location reads happen only within the existing authorized status read. No new
 permission channel, location history or motion behavior is introduced.

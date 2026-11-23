@@ -1,6 +1,76 @@
 # 接入测试
 
-更新：2026-11-15。本页汇总实际验证和可复现入口；每节按其当次源码、部署与硬件范围解释。当前功能状态及产品顺序见 [PROGRESS.md](PROGRESS.md)，本轮真实机器狗交付记录见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。视频四项验收的单独矩阵见 [docs/VIDEO_ACCEPTANCE_20261115.md](docs/VIDEO_ACCEPTANCE_20261115.md)。
+更新：2026-11-17。本页汇总实际验证和可复现入口；每节按其当次源码、部署与硬件范围解释。当前功能状态及产品顺序见 [PROGRESS.md](PROGRESS.md)，本轮真实机器狗交付记录见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。视频四项验收的单独矩阵见 [docs/VIDEO_ACCEPTANCE_20261115.md](docs/VIDEO_ACCEPTANCE_20261115.md)。
+
+## 2026-11-17 GPS 接口与上传验证
+
+本轮复用已有 GNSS 位置格式，调整 cloud-link 的快照有效期为3秒、未来容差1秒。新增现有 `lab check` 场景断言，覆盖签名 MQTT 报告、HTTP 按需状态和 `status/latest` 的位置保真。过期和失锁场景先完成快照替换后的按需读取，再检查时间更晚、序号更高的新报告，防止旧在途报告造成误判。
+
+| 检查 | 本轮结果与范围 |
+| --- | --- |
+| Rust SDK `cargo test --test grpc location:: --locked --offline -j 1` | 3 项通过 |
+| 生产 Python Gateway → Rust `watch_location` 示例 | 5 样本，约4.11秒，Ready → Ready → NoFix → Stale → Ready |
+| LingTu geography 与 gRPC location | 21 项通过，覆盖状态、字段、1Hz、恢复与取消 |
+| C++ GNSS 快照行为检查 | 编译执行退出0，Windows 跳过 POSIX 原子替换并发项 |
+| `cargo test --locked --offline -p doso-cloud-link gnss:: -j 1` | 3 项通过，含3秒和1秒边界、4秒旧快照、未来1.5秒拒绝 |
+| Gateway `signed_location_is_preserved_without_carrying_old_fix` | 1 项通过，签名后保留源时间/空精度，下一报告清除旧位置 |
+| Gateway `sync_source_failure_does_not_apply_and_request_matches_contract` | 1 项通过，既有 HTTP 同步投影透传检查 |
+| `target/debug/lab.exe check` | 退出0，有效位置、过期、失锁、既有许可/断云/视频场景通过 |
+
+lab 使用本机真实 Rust cloud-link、TLS Mosquitto 和 Gateway，Brainstem 与 GNSS 输入为模拟数据。运行需沿用本页既有 Mosquitto、ACL 插件与 OpenSSL 环境配置。当前结果覆盖本地软件链路，真实数据库位置链路的历史证据仍见 2026-11-08 记录。
+
+真机在 02:11 CST 缺少 GNSS 快照和进程，`5052`、`13146` 未监听。RM500U-CNV AT 接口按 USB 身份定位后，三条只读 QGPS 查询均返回 `+CME ERROR: 4`。独立接收机的型号/端口待确认，真实定位、正式机端服务及公网云端读回尚待验收。
+
+证据目录为 `D:\DOSO\artifacts\robot-cloud\location-20261117`，包含 `sdk-example/cross-language.json`、`driver-check.json`、`gateway-location-test.log` 和 `cloud-check.log`。GPS 字段、上传依赖与配置见 [GNSS 接入](docs/GNSS.md)。
+
+## 2026-11-18 Brainstem 与 5052 Gateway 分层核对
+
+只读核对确认 Brainstem 是机器狗的唯一硬件 owner，负责 CAN、IMU、关节、电机状态、运动仲裁和安全输出。`13145` 是完整底层入口，`13146` 只注册 `GetControlStatus`。LingTu `lt-host` 中的 GatewayModule 提供 `5052` 七域 gRPC 服务，调用已有 owner，不打开第二套 CAN、串口或传感器采集。
+
+现场 02:51 CST 结果为 `brainstem.service=active`、`13145` 监听、`lt-host.service=inactive/dead`、`5052` 未监听。此时可以直接验证 Brainstem 的底层 RPC，不能把这些读取结果写成 DOSO SDK `5052` 已打通。
+
+LingTu 预检回归使用 `.venv/Scripts/python.exe -m pytest tests/runtime/test_gateway_grpc_preflight.py -q`，3 项通过。覆盖完整 runtime 文件、ProductControl session gate、独立 gRPC API key、TLS 成对配置、aarch64 manifest 签名和缺少 session 的阻断。预检只读，不启动 Host，不修改设备。
+
+部署规则见 [5052 部署门](docs/FORMAL_GATEWAY_5052_DEPLOYMENT_20261115.md)。
+
+## 2026-11-17 远控接入验证
+
+业务账号入口 Deno 定向测试 6/6、App 会话 service Node 测试 6/6，全 App `npx tsc --noEmit` 退出 0。覆盖当前机主校验、客户端伪造操作者拒绝、签发/关闭、上游异常、账号切换和未知提交结果。
+
+组合入口 `cargo run --locked --offline -p lab -- control-check` 退出 0。它使用随机回环端口上的真实 HTTP 会话入口和双向 gRPC 中继、真实机端控制桥、锁定 Git SDK 与模拟 Motion 服务。无速度的 Claim/Hold/Release 以机端 `already_idle` 和明确未持权作为正常空闲释放结果；原始 final_output_confirmed 和 submission_unknown 独立保留。组合验证还覆盖等待 4 秒后的首条 Claim、本地流 3 秒空闲关闭后的显式重新申请，以及操作者断链释放。
+
+`cargo test --locked --offline --workspace -j 1` 为 116 passed、0 failed、1 ignored（原有 subprocess fixture）。随后增加公钥轮换即断开旧设备连接的测试，最终 Gateway 全包为 39 passed、0 failed。最终 workspace all-targets Clippy `-D warnings`、格式和 diff 检查通过。
+
+设备挑战/会话签名、序号/到期、单待 ACK、撤销、未 attach 会话回收、迟到 ACK、公钥轮换及双侧断链均有回归。检查与原始日志索引见 [remote-control-acceptance-20261117.json](../artifacts/robot-cloud/real-connect-20261113/remote-control-acceptance-20261117.json)。
+
+新增远控源码尚未安装到真机或发布线上，速度流与 App 控制页仍待接入。在途设备归属变更的主动撤销仍需业务事件驱动。
+
+## 2026-11-17 蜂窝 SIM 与 5G 注册
+
+00:49:41 CST 按 USB 身份确认 RM500U-CNV 的 AT 端口为 `/dev/ttyUSB4`，CRLF 结束的查询得到 `CPIN: READY`、`COPS: CHINA BROADNET`、`C5GREG: 0,1`、`CGATT: 1`、`CGACT: 11,1`、`QNWINFO: NR5G-SA / NR N28`。SIM 与 5GS 本地注册通过，CID 11 在模块内激活。LTE 查询为 `CEREG: 0,0`，按本次实际 5G SA 制式解释。
+
+主机 `usb0` 仍 DOWN、carrier=0、无 IP/蜂窝路由，默认路由走 `wlan0`。主机蜂窝出网与指定蜂窝接口 HTTPS 均待接通网络后验证。查询进程退出、串口关闭，无残留占用。原始字段见 [cellular-verification-20261117.json](../artifacts/robot-cloud/real-connect-20261113/cellular-verification-20261117.json)。
+
+## 2026-11-16 蜂窝模块现场复核
+
+22:12 CST 的 SSH 枚举读取到 Quectel RM500U-CNV（`2c7c:0900`），驱动为 `cdc_ncm` 和 `option`，`usb0` 无载波、无 IP；AT 串口打开超时，SIM 和注册状态未验证。
+
+22:43 CST 再次 SSH 复核时，设备 uptime 为 19 分钟，USB/PCI 列表均未枚举到该模块，`usb0` 和 WWAN 接口均不存在。当前 `ttyUSB0` 属于 CH340（`1a86:7523`），`ttyUSB1` 属于 CP210x（`10c4:ea60`）。默认路由走 `wlan0`，网关为 `192.168.66.1`。本次检查覆盖 USB 身份与驱动、PCI、网卡与路由、串口归属及内核枚举日志。
+
+| 验收项 | 本次结果 |
+| --- | --- |
+| 当前机载 5G 模块可见 | `BLOCKED_DEVICE_ABSENT` |
+| SIM 可读 | `NOT_VERIFIED` |
+| 4G/5G 注册 | `NOT_VERIFIED` |
+| 指定蜂窝接口的数据连接 | `NOT_VERIFIED` |
+
+后续先确认供电和 USB 数据连接，按设备身份重新发现 AT 端口，再读取 SIM、注册、信号及数据连接。当前枚举不足以判定模块消失的物理原因。真机标准安装路径中未找到 `doso-ota` 服务或二进制。现场记录见 [cellular-verification-20261116.json](../artifacts/robot-cloud/real-connect-20261113/cellular-verification-20261116.json)。
+
+## 2026-11-16 OTA 当前源码回归
+
+执行 `cargo test --locked --offline -p doso-ota -p doso-ota-release -j 1`，退出 0。机端 OTA 6 项、发布 API 1 项，共 7 项通过、0 失败、0 ignored；编译 48.91 秒，测试约 0.15 秒。
+
+覆盖签名、精确大小与哈希、断点下载、单任务排队与槽位持久化、模拟健康提交及 OSS URL 签名。云任务领取与进度回传、真实 systemd 槽位启动、真机自动回滚仍待实现或实测。当前安装前的电量、在线和任务状态来自启动时环境变量，远程接入前需改为现场读取。此次测试未执行机端升级。
 
 ## 2026-11-15 现场只读状态窗口
 

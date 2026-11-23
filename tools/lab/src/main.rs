@@ -1,5 +1,8 @@
 mod auto_check;
 mod brainstem;
+mod control_chain;
+mod control_check;
+mod control_fixture;
 mod fixture;
 mod simulated;
 mod uplink;
@@ -211,6 +214,17 @@ impl Local {
             self.brainstem.reads() == before,
             "periodic reading started without permission"
         );
+        let fix_time = now_ms() - 125;
+        let mut gnss = json!({"location":{
+            "lat":31.2304,"lon":121.4737,"fix_type":1,
+            "ts":fix_time as f64 / 1000.0,"accuracy_m":null
+        }});
+        fs::write(
+            self.fixture.path("gnss-status.json"),
+            serde_json::to_vec(&gnss)?,
+        )?;
+        let location = json!({"lat":31.2304,"lon":121.4737,"fixType":1,
+            "observedAt":timestamp(fix_time),"accuracyM":null});
         let mut permission = json!({"authorizationEpoch":1,"consentVersion":1,"enabled":true,
             "connectionId":connection,"reportingSessionId":uuid::Uuid::new_v4().to_string(),
             "expiresAt":timestamp(now_ms()+15_000)});
@@ -259,6 +273,14 @@ impl Local {
             "incorrect status projection"
         );
         println!("PASS confirmed permission allows signed status HTTP 200");
+        ensure!(
+            first["latest"]["report"]["status"]["location"] == location
+                && snapshot["location"] == location,
+            "signed GNSS report or queried status changed coordinates, fix time or unknown accuracy"
+        );
+        println!(
+            "PASS GNSS: signed report and HTTP preserve coordinates, fix time and unknown accuracy"
+        );
         let first_seq = first["latest"]["report"]["seq"]
             .as_u64()
             .context("missing report sequence")?;
@@ -280,6 +302,52 @@ impl Local {
             "SIMULATED latest: {}",
             serde_json::to_string(&standing["latest"])?
         );
+
+        let mut sequence = standing["latest"]["report"]["seq"].as_u64().unwrap();
+        for (reason, fix_type, fix_time) in
+            [("expired", 1, now_ms() - 60_000), ("unfixed", 0, now_ms())]
+        {
+            gnss["location"]["fix_type"] = json!(fix_type);
+            gnss["location"]["ts"] = json!(fix_time as f64 / 1000.0);
+            fs::write(
+                self.fixture.path("gnss-status.tmp"),
+                serde_json::to_vec(&gnss)?,
+            )?;
+            fs::rename(
+                self.fixture.path("gnss-status.tmp"),
+                self.fixture.path("gnss-status.json"),
+            )?;
+            // Finish any read that began before the snapshot replacement.
+            let (status, snapshot) = self.query(true).await?;
+            ensure!(
+                status == 200 && snapshot.get("location").is_none(),
+                "{reason} GNSS retained an old fix or interrupted robot status"
+            );
+            let read_time = snapshot["observedAt"]
+                .as_str()
+                .context("missing read time")?;
+            let latest = self
+                .wait_for(|value| {
+                    value["latest"]["report"]["seq"]
+                        .as_u64()
+                        .is_some_and(|seq| seq > sequence)
+                        && value["latest"]["report"]["observedAt"]
+                            .as_str()
+                            .is_some_and(|time| time > read_time)
+                        && value["latest"]["report"]["status"]
+                            .get("location")
+                            .is_none()
+                })
+                .await?;
+            ensure!(
+                latest["fresh"] == true,
+                "{reason} GNSS retained an old fix or interrupted robot status"
+            );
+            sequence = latest["latest"]["report"]["seq"].as_u64().unwrap();
+            println!(
+                "PASS GNSS {reason}: newer report omits location; robot status stays available"
+            );
+        }
 
         self.brainstem.fail(true);
         let failed = self
@@ -632,6 +700,8 @@ async fn public(config: &Path) -> Result<()> {
 async fn run() -> Result<()> {
     let arguments: Vec<_> = env::args().skip(1).collect();
     match arguments.as_slice() {
+        [mode] if mode == "control-check" => control_chain::run().await,
+        [mode, session] if mode == "control" => control_check::run(Path::new(session)).await,
         [mode, heartbeat] if mode == "video-source" => {
             video_check::source(Path::new(heartbeat)).await
         }
@@ -665,7 +735,7 @@ async fn run() -> Result<()> {
         [mode, config] if mode == "public" => public(Path::new(config)).await,
         [mode, device] if mode == "uplink" => uplink::run(device).await,
         _ => anyhow::bail!(
-            "usage: lab auth-check | lab check | lab auto-check [wire.json] | lab demo | lab local | lab public <link.json> | lab uplink <device-UUID>"
+            "usage: lab auth-check | lab check | lab auto-check [wire.json] | lab control <session.json> | lab demo | lab local | lab public <link.json> | lab uplink <device-UUID>"
         ),
     }
 }

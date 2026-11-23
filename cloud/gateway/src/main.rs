@@ -1,4 +1,4 @@
-use doso_cloud_gateway::{Gateway, SyncConfig, app, run_mqtt, run_sync};
+use doso_cloud_gateway::{Gateway, SyncConfig, app_with_control, control, run_mqtt, run_sync};
 use robot_cloud_common::{connect_mqtt, load_signing_key, shutdown_signal};
 use std::{env, path::PathBuf, sync::Arc};
 
@@ -28,13 +28,36 @@ async fn run() -> anyhow::Result<()> {
         registry_path,
         reporting_path,
     )?);
-    let router = app(gateway.clone(), &api_key)?;
+    let hub = env::var("DOSO_CONTROL_PORT")
+        .ok()
+        .map(|value| -> anyhow::Result<_> {
+            let port = value.parse::<u16>()?;
+            anyhow::ensure!(port > 0, "invalid_control_port");
+            Ok((Arc::new(control::Hub::new(gateway.clone())), port))
+        })
+        .transpose()?;
+    let mut control_runtime = None;
+    if let Some((hub, port)) = &hub {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", *port)).await?;
+        let (shutdown, stopped) = tokio::sync::watch::channel(false);
+        let hub = hub.clone();
+        control_runtime = Some((
+            shutdown,
+            tokio::spawn(control::serve(hub, listener, stopped)),
+        ));
+    }
+    let control_hub = hub.map(|(hub, _)| hub);
+    let router = app_with_control(gateway.clone(), &api_key, control_hub.clone())?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let mqtt = tokio::spawn(run_mqtt(gateway.clone(), event_loop));
     let sync = sync_config.map(|config| tokio::spawn(run_sync(gateway.clone(), config)));
     let sync_abort = sync.as_ref().map(|task| task.abort_handle());
     println!("robot_cloud_gateway_listening");
     let shutdown_gateway = gateway.clone();
+    let shutdown_control = control_hub.clone();
+    let control_signal = control_runtime
+        .as_ref()
+        .map(|(shutdown, _)| shutdown.clone());
     let result = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
@@ -42,9 +65,22 @@ async fn run() -> anyhow::Result<()> {
                 sync.abort();
             }
             shutdown_gateway.disconnected();
+            if let Some(hub) = shutdown_control {
+                hub.shutdown();
+            }
+            if let Some(shutdown) = control_signal {
+                let _ = shutdown.send(true);
+            }
         })
         .await;
     gateway.disconnected();
+    if let Some(hub) = control_hub {
+        hub.shutdown();
+    }
+    if let Some((shutdown, task)) = control_runtime {
+        let _ = shutdown.send(true);
+        task.await??;
+    }
     if let Some(sync) = sync {
         sync.abort();
         let _ = sync.await;

@@ -1,5 +1,9 @@
 # Linux 构建
 
+## 2026-11-17 远控构建依赖
+
+新增远控协议由 `shared/build.rs` 使用 protoc 生成。机端与 lab 引用锁定 Git 提交的 `doso-sdk`，最低 Rust 为 1.94。首次构建需要获取该依赖，此后使用当前 Cargo.lock 执行锁定离线构建。历史 ARM64 包和旧 Gateway 候选不包含本轮远控代码；当前部署与验收见 [远控交付](docs/REMOTE_CONTROL_DELIVERY.md)。
+
 更新：2026-11-14。当前源码目录为 `robot/`、`cloud/`、`shared/`、`tools/`；包名和目标二进制名沿用原合同。研发机已安装 ARM64 `doso-cloud-link` 候选、本机 authorizer 和独立身份材料；云端设备登记已启用，但目标机当前不可达，不能把安装记录写成真实 MQTT 上线。其他候选包、ABI 和安装记录仍属于各自标明的历史构建，当前源码与线上制品须核对具体制品。
 
 本地 authorizer 的可复核 ARM64 发布候选已固化到 [20261114-authorizer-aarch64](D:/DOSO/robot-cloud/artifacts/robot-cloud/releases/20261114-authorizer-aarch64/manifest.json)。同目录的 `field-preflight.env` 提供 authorizer 和 cloud-link 的只读期望哈希。该包尚未部署到机器狗；现场部署前后必须校验 manifest 中的 binary SHA256，远程制品验证完成前不执行授权开启。

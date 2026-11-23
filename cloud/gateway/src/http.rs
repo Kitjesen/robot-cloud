@@ -31,6 +31,7 @@ impl Error {
 struct HttpState {
     gateway: Arc<Gateway>,
     authorization_hash: [u8; 32],
+    control: Option<Arc<crate::control::Hub>>,
 }
 
 fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
@@ -63,6 +64,14 @@ async fn query(State(state): State<HttpState>, request: Request<Body>) -> Respon
         return response;
     }
     let path = request.uri().path().strip_prefix("/api/v1/robots/");
+    if let Some((device_id, suffix)) = path.and_then(|path| path.split_once("/control/sessions"))
+        && is_uuid(device_id)
+        && (suffix.is_empty() || suffix.strip_prefix('/').is_some_and(is_uuid))
+    {
+        let device_id = device_id.to_owned();
+        let session_id = suffix.strip_prefix('/').map(str::to_owned);
+        return control_session(state, request, &device_id, session_id.as_deref()).await;
+    }
     let route = path.and_then(|path| {
         [
             ("/status/latest", Method::GET),
@@ -170,6 +179,14 @@ async fn query(State(state): State<HttpState>, request: Request<Body>) -> Respon
 }
 
 pub fn app(gateway: Arc<Gateway>, api_key: &str) -> anyhow::Result<Router> {
+    app_with_control(gateway, api_key, None)
+}
+
+pub fn app_with_control(
+    gateway: Arc<Gateway>,
+    api_key: &str,
+    control: Option<Arc<crate::control::Hub>>,
+) -> anyhow::Result<Router> {
     anyhow::ensure!(
         (32..=256).contains(&api_key.len())
             && api_key.bytes().all(|byte| (33..=126).contains(&byte)),
@@ -179,5 +196,73 @@ pub fn app(gateway: Arc<Gateway>, api_key: &str) -> anyhow::Result<Router> {
     Ok(Router::new().fallback(query).with_state(HttpState {
         gateway,
         authorization_hash,
+        control,
     }))
+}
+
+async fn control_session(
+    state: HttpState,
+    request: Request<Body>,
+    device_id: &str,
+    session_id: Option<&str>,
+) -> Response {
+    let Some(control) = state.control else {
+        return reject(StatusCode::NOT_FOUND, "not_found");
+    };
+    if request.uri().query().is_some() {
+        return reject(StatusCode::NOT_FOUND, "not_found");
+    }
+    let method = if session_id.is_some() {
+        Method::DELETE
+    } else {
+        Method::POST
+    };
+    if request.method() != method {
+        let mut response = reject(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
+        response
+            .headers_mut()
+            .insert(header::ALLOW, method.as_str().parse().unwrap());
+        return response;
+    }
+    let bytes =
+        match tokio::time::timeout(Duration::from_secs(1), to_bytes(request.into_body(), 2048))
+            .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(_)) => return reject(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
+            Err(_) => return reject(StatusCode::BAD_REQUEST, "invalid_control_identity"),
+        };
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Actor {
+        operator_id: String,
+        authorization_epoch: u64,
+    }
+    let Ok(actor) = serde_json::from_slice::<Actor>(&bytes) else {
+        return reject(StatusCode::BAD_REQUEST, "invalid_control_identity");
+    };
+    let result = match session_id {
+        Some(session_id) => control
+            .revoke(
+                device_id,
+                session_id,
+                &actor.operator_id,
+                actor.authorization_epoch,
+            )
+            .map(|()| json_response(StatusCode::OK, json!({"closed": true}))),
+        None => control
+            .create_session(device_id, &actor.operator_id, actor.authorization_epoch)
+            .map(|session| json_response(StatusCode::CREATED, json!(session))),
+    };
+    result.unwrap_or_else(|error| {
+        let (status, code) = match error.code() {
+            tonic::Code::InvalidArgument => (StatusCode::BAD_REQUEST, "invalid_control_identity"),
+            tonic::Code::PermissionDenied => (StatusCode::FORBIDDEN, "control_forbidden"),
+            tonic::Code::AlreadyExists => (StatusCode::CONFLICT, "control_session_active"),
+            tonic::Code::NotFound => (StatusCode::NOT_FOUND, "control_session_missing"),
+            tonic::Code::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "device_disconnected"),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "control_unavailable"),
+        };
+        reject(status, code)
+    })
 }

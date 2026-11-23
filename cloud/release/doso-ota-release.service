@@ -1,0 +1,20 @@
+[Unit]
+Description=DOSO OTA release API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=doso-release
+Group=doso-release
+EnvironmentFile=/etc/doso/ota-release/release.env
+ExecStart=/usr/local/lib/doso-ota-release/doso-ota-release
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/doso-ota-release
+
+[Install]
+WantedBy=multi-user.target

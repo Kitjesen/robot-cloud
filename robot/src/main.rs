@@ -8,6 +8,8 @@ mod retry;
 mod session;
 mod source;
 
+use doso_cloud_link::control;
+
 #[tokio::main]
 async fn main() {
     let enabled = std::env::var_os("DOSO_CLOUD_ON")
@@ -18,7 +20,19 @@ async fn main() {
         println!("cloud_off");
         return;
     }
-    if let Err(err) = link::run(&choice).await {
+    let result = match std::env::args().nth(1).as_deref() {
+        None => link::run(&choice).await,
+        Some("control") => match control::Config::from_env() {
+            Ok(config) => tokio::select! {
+                result = control::run(&config) => result.map_err(|_| "control_link_failed"),
+                _ = choice.closed() => Ok(()),
+                _ = robot_cloud_common::shutdown_signal() => Ok(()),
+            },
+            Err(_) => Err("control_config_error"),
+        },
+        Some(_) => Err("invalid_command"),
+    };
+    if let Err(err) = result {
         eprintln!("cloud_error reason={err}");
         std::process::exit(78);
     }

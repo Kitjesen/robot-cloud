@@ -1,0 +1,53 @@
+syntax = "proto3";
+package doso.remote.v1;
+
+service RemoteControl {
+  rpc DeviceLink(stream DeviceEvent) returns (stream DeviceCommand);
+  rpc Operate(stream OperatorInput) returns (stream ControlReply);
+}
+
+message DeviceEvent {
+  oneof event {
+    bytes proof = 1;
+    ControlReply reply = 2;
+  }
+}
+
+message DeviceCommand {
+  oneof command {
+    string challenge = 1;
+    bytes grant = 2;
+    ControlInput input = 3;
+    string close_session = 4;
+  }
+}
+
+message OperatorInput {
+  oneof input {
+    bytes grant = 1;
+    ControlInput command = 2;
+  }
+}
+
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  ACTION_CLAIM = 1;
+  ACTION_HOLD = 2;
+  ACTION_RELEASE = 3;
+}
+
+message ControlInput {
+  string session_id = 1;
+  uint64 sequence = 2;
+  Action action = 3;
+}
+
+message ControlReply {
+  string session_id = 1;
+  uint64 sequence = 2;
+  bool accepted = 3;
+  string reason = 4;
+  optional bool held_by_client = 5;
+  bool final_output_confirmed = 6;
+  bool submission_unknown = 7;
+}

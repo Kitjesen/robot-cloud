@@ -1,4 +1,6 @@
-# 云端只读网关
+# 云端网关
+
+2026-11-17 新增独立的用户授权远控入口，配置 `DOSO_CONTROL_PORT` 后提供 DeviceLink/Operate 双向 gRPC 中继与 HTTP 会话签发、撤销。当前支持 Claim、Hold、Release，源码位于 `src/control/`；配置与部署范围见 [远控交付](../../docs/REMOTE_CONTROL_DELIVERY.md)。下文记录既有状态链行为。
 
 文档核对：2026-11-08；依据当前源码与已有部署、验收记录，本次未重新检查线上服务。
 
