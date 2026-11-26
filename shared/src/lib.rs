@@ -182,6 +182,27 @@ pub fn load_verifying_key(path: &str) -> Result<VerifyingKey> {
     )?)?)
 }
 
+const DEFAULT_MQTT_KEEP_ALIVE_SECS: u64 = 45;
+const MIN_MQTT_KEEP_ALIVE_SECS: u64 = 15;
+const MAX_MQTT_KEEP_ALIVE_SECS: u64 = 120;
+
+fn parse_mqtt_keep_alive(value: Option<&str>) -> Result<Duration> {
+    match value {
+        None => Ok(Duration::from_secs(DEFAULT_MQTT_KEEP_ALIVE_SECS)),
+        Some(raw) => {
+            let secs = raw
+                .trim()
+                .parse::<u64>()
+                .context("invalid_mqtt_keep_alive")?;
+            ensure!(
+                (MIN_MQTT_KEEP_ALIVE_SECS..=MAX_MQTT_KEEP_ALIVE_SECS).contains(&secs),
+                "invalid_mqtt_keep_alive"
+            );
+            Ok(Duration::from_secs(secs))
+        }
+    }
+}
+
 pub fn connect_mqtt(client_id: &str) -> Result<(AsyncClient, EventLoop)> {
     let url = url::Url::parse(&env::var("DOSO_MQTT_URL")?)?;
     ensure!(
@@ -197,11 +218,16 @@ pub fn connect_mqtt(client_id: &str) -> Result<(AsyncClient, EventLoop)> {
     let ca = fs::read(env::var("DOSO_MQTT_CA")?)?;
     let cert = fs::read(env::var("DOSO_MQTT_CERT")?)?;
     let key = fs::read(env::var("DOSO_MQTT_KEY")?)?;
+    let keep_alive = match env::var("DOSO_MQTT_KEEP_ALIVE_SECS") {
+        Ok(value) => parse_mqtt_keep_alive(Some(&value))?,
+        Err(env::VarError::NotPresent) => parse_mqtt_keep_alive(None)?,
+        Err(_) => anyhow::bail!("invalid_mqtt_keep_alive"),
+    };
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut options = MqttOptions::new(client_id, host, url.port().unwrap_or(8883));
     options.set_transport(Transport::tls(ca, Some((cert, key)), None));
     options.set_clean_start(true);
-    options.set_keep_alive(Duration::from_secs(15));
+    options.set_keep_alive(keep_alive);
     options.set_max_packet_size(Some(MAX_MESSAGE_BYTES as u32));
     Ok(AsyncClient::new(options, 32))
 }
@@ -283,5 +309,28 @@ mod tests {
                 fixture["now"].as_i64().unwrap(),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn mqtt_keep_alive_defaults_and_bounds() {
+        assert_eq!(
+            parse_mqtt_keep_alive(None).unwrap(),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            parse_mqtt_keep_alive(Some("15")).unwrap(),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            parse_mqtt_keep_alive(Some("60")).unwrap(),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            parse_mqtt_keep_alive(Some("120")).unwrap(),
+            Duration::from_secs(120)
+        );
+        for bad in ["", "0", "14", "121", "abc"] {
+            assert!(parse_mqtt_keep_alive(Some(bad)).is_err(), "{bad}");
+        }
     }
 }

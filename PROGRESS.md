@@ -1,5 +1,13 @@
 # 云端系统：当前进度与产品推进
 
+## 2026-11-26 研发机 1 状态链路恢复与 443 WSS 反向运维通道（3 号机端到端验收）
+
+OTA 正式生产域名切流已于同日完成上线：在阿里云 ESA 与云解析补齐 `api.dosorobotics.com -> 47.103.89.137` A 记录（仅 DNS 模式），签发 Let's Encrypt 证书（有效期至 `2027-02-24`），并启用最小暴露面 Nginx 配置 `/etc/nginx/sites-available/doso-api-prod-ota`（仅反代 `/ota/` → `127.0.0.1:8140`，其余路径返回 `404`）。3 号机（`192.168.66.13`）已迁移至 `https://api.dosorobotics.com/ota` 并完成 `policy_package` 实包验收（Job `a8e1835d-dd45-4ab3-87a1-636a2a46bb72`，`sequence=202`，`724,464 B`，`phase=succeeded`，`motor_output_enabled=false`，`vbus_min_v=53.27V`，零重启）。同日将工具脚本与模板默认 OTA 域名同步切换为 `https://api.dosorobotics.com/ota`，并整理交接手册见 [OTA 与机器狗项目交接手册](docs/HANDOVER_OTA_AND_ROBOT_20261126.md) 与 [OTA 生产运维手册](docs/OTA_PRODUCTION_RUNBOOK.md)。
+
+研发机 1（`d82a831a-2e86-4b46-975b-3d42473583b7`）云端状态 503 与每 2 秒 `robot_cloud_sync_permission_failed` 已定位并安全修复：原因为 ECS 上 `device-...-signing.pub` 属组误设为 `root:mosquitto`（源自 `tools/deploy/apply-device-registration.sh`）。按安全顺序先在 SWAS Supabase 事务内绑定账号并开启上报（`enabled=true`），再修正 ECS 公钥属组为 `root:doso-cloud`，零重启恢复 `GET /status/latest` HTTP 200 且报错清零；同步修复登记脚本，并将 `shared/src/lib.rs` 默认 MQTT 心跳由 15 秒放宽至 45 秒（支持 `DOSO_MQTT_KEEP_ALIVE_SECS` 配置，`robot-cloud-common` 11/11 通过）。
+
+全量客户机统一 443 WSS 反向运维通道已完成云端上线与 3 号机、研发机 1 双机实测验收：在 SWAS `47.103.89.137` 部署回环监听版 `frps v0.72.0`（`127.0.0.1:7000`，`proxyBindAddr=127.0.0.1`，不改安全组）并通过 Nginx `api-test.dosorobotics.com/~!frp` 复用 443 HTTPS；3 号机（`192.168.66.13` → `127.0.0.1:22003`）实测通过 SSH 登录执行（465ms）、64KB SCP 双向校验（2166ms）、`frpc` `kill -9` 自动恢复（6.26s）与云端 `frps` 重启自动重连（3.55s）；远端研发机 1（`thunder-dev-001` → `127.0.0.1:22001`）已通过离线一键包现场激活并于 21:41 在阿里云真实 SSH 登录验通（双机同时在线）。整机断电重启自启与 5G 蜂窝切换长稳待后续补测。详情见 [反向运维通道部署与验收手册](docs/OPS_TUNNEL_ACCEPTANCE_20261126.md) 与 [tools/ops-tunnel](tools/ops-tunnel/README.md)。
+
 ## 2026-11-18 本地 SDK 直连 Brainstem
 
 当前产品路径收敛为 `App / 本地 Rust 程序 → BrainstemClient → 13145`，不要求部署独立 `5052`。Rust SDK 已实现状态、Profile、电压、电机状态、IMU/关节流、控制权租约、站坐、速度、External 和电机门操作；新客户端已对真机 `192.168.66.64:13145` 完成只读复核。控制动作、External 输出、15 分钟长稳仍待现场验收。`13146` 继续只供 `doso-cloud-link` 读取 `GetControlStatus`，云端不获得 `13145` 控制权。七域 `5052` Gateway 只作为未来地图、SLAM、导航和任务入口保留。

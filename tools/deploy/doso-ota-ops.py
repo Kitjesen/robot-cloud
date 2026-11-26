@@ -970,8 +970,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--base-url",
-        default=os.environ.get("DOSO_OTA_CLOUD_URL", "https://api-test.dosorobotics.com/ota"),
-        help="doso-ota-release base URL (default: $DOSO_OTA_CLOUD_URL or https://api-test.dosorobotics.com/ota)",
+        default=os.environ.get("DOSO_OTA_CLOUD_URL", "https://api.dosorobotics.com/ota"),
+        help="doso-ota-release base URL (default: $DOSO_OTA_CLOUD_URL or https://api.dosorobotics.com/ota)",
     )
     p.add_argument(
         "--token-env",
@@ -1046,7 +1046,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_env.add_argument("--brainstem-version", required=True)
     sp_env.add_argument("--brainstem-release", required=True)
     sp_env.add_argument("--verify-key", default="/etc/doso/robot-cloud/ota/release-signing.pub.pem")
-    sp_env.add_argument("--cloud-url", default="https://api-test.dosorobotics.com/ota")
+    sp_env.add_argument("--cloud-url", default="https://api.dosorobotics.com/ota")
     sp_env.add_argument("--poll-interval-secs", type=int, default=15)
     sp_env.add_argument("--output", type=Path)
     sp_env.set_defaults(func=cmd_render_robot_env)
