@@ -1,12 +1,12 @@
 # 机器狗云连接
 
-文档核对：2026-11-26。项目交接全景见 [docs/HANDOVER_OTA_AND_ROBOT_20261126.md](docs/HANDOVER_OTA_AND_ROBOT_20261126.md)，功能状态和下一阶段统一见 [PROGRESS.md](PROGRESS.md)，测试范围见 [TESTING.md](TESTING.md)；早期真实交付证据见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。核对日期不代表所有组件均已重新部署或真机验收。
+文档核对：2026-11-26。项目交接全景见 [docs/HANDOVER_OTA_AND_ROBOT_20261126.md](docs/HANDOVER_OTA_AND_ROBOT_20261126.md)，功能状态和下一阶段统一见 [PROGRESS.md](PROGRESS.md)，测试范围见 [TESTING.md](TESTING.md)。核对日期不代表所有组件均已重新部署或真机验收。
 
 独立 Rust 工程位于 `D:\DOSO\robot-cloud`，源码按运行位置组织：`robot/` 与 `ota/`、`robot-authorizer/` 运行在机器狗 Linux 主机，`cloud/` 部署到云服务器，`shared/` 编译进两端，`tools/` 放开发联调、部署与反向运维工具。
 
 - **2026-11-26 OTA 正式生产域名上线**：`doso-ota-release` 正式域名 `https://api.dosorobotics.com/ota` 已切流上线并完成 Dog3 `policy_package` 实包端到端验收，运维 CLI 位于 [tools/deploy/doso-ota-ops.py](tools/deploy/doso-ota-ops.py)，操作手册见 [OTA_PRODUCTION_RUNBOOK.md](docs/OTA_PRODUCTION_RUNBOOK.md)。
 - **2026-11-26 443 WSS 反向运维通道**：面向 5G CGNAT 环境上线自建 `frp v0.72.0` 回环隧道（[tools/ops-tunnel/](tools/ops-tunnel/README.md)），不改安全组、不暴露公网 SSH，已完成 3 号机与研发机 1 双机验通。
-- **2026-11-17 远控会话候选**：新增账号授权的远控会话、双向 gRPC 中继和机端 Rust SDK 桥，首版支持 Claim、Hold、Release。完整代码路径、配置与交付顺序见 [远控交付](docs/REMOTE_CONTROL_DELIVERY.md)。本地组合验证使用 `cargo run --locked --offline -p lab -- control-check`，设备侧 Motion 为模拟实现，正式部署与真机结果维护在 PROGRESS.md 和 TESTING.md。
+- **2026-11-26 远控指令与连续运动控制扩展**：已扩展 13 个控制动作（`Claim`/`Hold`/`Release`/`Velocity` 及 9 个离散 `Motion` RPC）、云端非阻塞流式转发与机端 `TeleopBridge` 300ms 看门狗；已在本地通过模拟 `Motion` 端到端链路验证（`cargo run --locked --offline -p lab -- control-check`），物理真机与线上 Gateway 更新待后续部署，详见 [远控交付](docs/REMOTE_CONTROL_DELIVERY.md)。
 
 ```text
 robot-cloud/
@@ -29,7 +29,7 @@ robot-cloud/
 └── Cargo.lock            统一依赖锁定
 ```
 
-`robot/` 的程序名仍为 `doso-cloud-link`；`cloud/gateway/` 的程序名仍为 `doso-cloud-gateway`。媒体服务是视频信令适配候选，部署和真机观看验收范围见其说明。根目录保留的 `agent/.omx/` 仅为历史工具元数据，没有运行程序。
+`robot/` 的程序名仍为 `doso-cloud-link`；`cloud/gateway/` 的程序名仍为 `doso-cloud-gateway`。媒体服务是视频信令适配候选，部署和真机观看验收范围见其说明。
 
 命名、抽象和职责标准见 [AGENTS.md](AGENTS.md)，用户操作与后台自动行为的边界见 [CONTRACT.md](CONTRACT.md)，当前进度和后续步骤见 [PROGRESS.md](PROGRESS.md)。
 
