@@ -13,9 +13,13 @@ explicitly marked product targets. Current delivery status is maintained in
 
 2026-11-17 用户新增远程控制需求。云状态请求继续只允许 `status.read`，机端固定调用 `GetControlStatus`。远程操控通过下文独立的用户授权会话接入本地 Motion / Teleop，经过现有控制权、就绪与安全链。状态许可、视频许可和服务级 Bearer 各自保留原职责。
 
-### Remote control sessions (2026-11-17)
+### Remote control sessions (2026-11-26)
 
-The first implementation supports typed `Claim`, `Hold` and `Release` actions.
+The relay supports typed authority actions (`Claim`, `Hold`, `Release`), streaming
+`Velocity` (`VelocityCommand` with `vx_m_s`, `vy_m_s`, `yaw_rad_s`, `deadman`,
+`manual_mode`, and robot-issued `input_window`), and discrete motion actions
+(`StandUp`, `SitDown`, `StopMotion`, `EmergencyStop`, `ClearEmergencyStop`,
+`Resume`, `EnableMotors`, `DisableMotors`, and `SwitchProfile`).
 `shared/proto/control.proto` is the canonical relay schema. A cloud session lasts
 at most 30 seconds and is bound to the operator, device, authorization epoch,
 current device connection and session UUID. The authenticated account backend
@@ -30,16 +34,25 @@ the corresponding session. Reconnecting requires a new account-authorized grant.
 
 `RemoteControl.Operate` accepts the signed grant as its first message and then
 typed inputs with the same session UUID and increasing sequence. The cloud and
-robot enforce expiry and reject replayed or cross-session input. Device replies
-carry the corresponding input sequence and the local SDK admission result.
-Cloud acceptance alone does not establish native control ownership.
+robot enforce expiry and reject replayed, malformed, out-of-bounds, or
+cross-session inputs. Device replies carry the corresponding input sequence,
+`input_window`, `ingress_accepted`, and the local SDK admission or receipt
+result (`final_output_confirmed` is never fabricated for unary receipts). Cloud
+acceptance alone does not establish native control ownership.
 
-The robot bridge calls the pinned Rust SDK's `Motion.Teleop` implementation.
-Session expiry, revocation and transport loss close the local Teleop stream.
-The existing native authority expiry and final-output barrier remain authoritative.
-Current first-stage wire messages provide no velocity or motor-target payload.
-Velocity support requires preserving the robot input window at the operator's
-sample time before that payload can be added.
+The robot bridge calls the pinned Rust SDK's `Motion` unary RPCs and continuous
+`Motion.Teleop` bidirectional stream (`TeleopBridge`):
+- Unsolicited `sequence == 0` window refreshes from `Motion.Teleop` are pushed
+  through Gateway to the operator as async `ControlReply` messages.
+- Streaming `Velocity` frames pass the operator's `input_window` verbatim to the
+  robot without stalling on per-frame ACKs or overwriting stale windows, while
+  bounded local queues prevent stale velocity frame buildup.
+- A bridge-side velocity deadman watchdog (`DOSO_CONTROL_VELOCITY_TIMEOUT_MS`,
+  default `300ms`, bounded `100..=1000ms`) automatically issues local `Hold` when
+  active velocity streaming goes silent.
+- Session expiry, revocation and transport loss close the local Teleop stream;
+  physical robot kinematics, latency, and stop-time acceptance remain pending on
+  real hardware after local simulated-lab validation.
 
 The new entry is enabled only when its control listener and robot control URL
 are configured. Production account/ownership integration, TLS routing, ARM64

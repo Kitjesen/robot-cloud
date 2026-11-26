@@ -84,6 +84,7 @@ fn sdk_reply_preserves_execution_evidence() {
         session_id: uuid::Uuid::new_v4().to_string(),
         sequence: 8,
         action: Action::Release as i32,
+        ..Default::default()
     };
     let reply = outcome(
         &input,
@@ -91,6 +92,8 @@ fn sdk_reply_preserves_execution_evidence() {
             accepted: false,
             reason: "native_release_unconfirmed".into(),
             final_output_confirmed: false,
+            input_window: 5,
+            ingress_accepted: false,
             ..Default::default()
         }),
     );
@@ -99,17 +102,23 @@ fn sdk_reply_preserves_execution_evidence() {
     assert!(!reply.accepted);
     assert_eq!(reply.held_by_client, None);
     assert!(!reply.final_output_confirmed);
+    assert_eq!(reply.input_window, 5);
+    assert!(!reply.ingress_accepted);
     assert_eq!(reply.reason, "native_release_unconfirmed");
     let reply = outcome(
         &input,
         Ok(doso_sdk::rpc::TeleopReply {
             accepted: true,
             final_output_confirmed: true,
+            input_window: 6,
+            ingress_accepted: true,
             ..Default::default()
         }),
     );
     assert!(reply.accepted);
     assert!(reply.final_output_confirmed);
+    assert_eq!(reply.input_window, 6);
+    assert!(reply.ingress_accepted);
 }
 
 #[test]
@@ -118,6 +127,7 @@ fn ownership_keeps_unknown_and_stale_state_distinct() {
         session_id: uuid::Uuid::new_v4().to_string(),
         sequence: 1,
         action: Action::Claim as i32,
+        ..Default::default()
     };
     for (fresh, held, expected) in [
         (true, Some(true), Some(true)),
@@ -141,4 +151,51 @@ fn ownership_keeps_unknown_and_stale_state_distinct() {
         assert_eq!(reply.held_by_client, expected);
         assert!(reply.accepted);
     }
+}
+
+#[test]
+fn receipt_outcome_preserves_acceptance_and_unknown_submission() {
+    let input = ControlInput {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        sequence: 11,
+        action: Action::StandUp as i32,
+        ..Default::default()
+    };
+    let ok = receipt_outcome(
+        &input,
+        Ok(doso_sdk::CommandReceipt {
+            ok: true,
+            accepted: Some(true),
+            reason: "started".into(),
+            reason_code: "ok".into(),
+            ..Default::default()
+        }),
+        4,
+    );
+    assert!(ok.accepted);
+    assert_eq!(ok.reason, "ok");
+    assert!(!ok.final_output_confirmed);
+    assert!(!ok.submission_unknown);
+    assert_eq!(ok.input_window, 4);
+
+    let rejected = receipt_outcome(
+        &input,
+        Ok(doso_sdk::CommandReceipt {
+            ok: false,
+            accepted: Some(false),
+            reason: "busy".into(),
+            reason_code: String::new(),
+            ..Default::default()
+        }),
+        4,
+    );
+    assert!(!rejected.accepted);
+    assert_eq!(rejected.reason, "busy");
+    assert!(!rejected.submission_unknown);
+
+    let err = error_to_reply(&input, "deadline exceeded".into(), true, 4);
+    assert!(!err.accepted);
+    assert!(err.submission_unknown);
+    assert_eq!(err.input_window, 4);
+    assert_eq!(err.reason, "deadline exceeded");
 }

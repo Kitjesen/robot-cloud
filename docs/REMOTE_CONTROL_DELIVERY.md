@@ -1,6 +1,6 @@
 # 远程控制产品交付
 
-更新于 2026-11-17。当前代码实现远控会话及 Claim、Hold、Release；验收结果维护在 TESTING.md，部署状态维护在 PROGRESS.md。
+更新于 2026-11-26。当前代码已在持权骨架（`Claim`、`Hold`、`Release`）基础上补齐 20–50Hz `Velocity` 遥操作与离散运控指令；本地模拟联调验证已更新，真机动作与弱网验收结果另行记录在 TESTING.md 与 PROGRESS.md。
 
 ## 完整代码路径
 
@@ -30,7 +30,7 @@
 2. 业务函数验证账号、终端会话、设备归属和授权版本，使用服务端凭据调用 Gateway 创建会话。
 3. 机器人主动连接 `RemoteControl.DeviceLink`，完成设备签名与一次性挑战校验。
 4. App 或 Rust 调用者提交短期 grant，建立 `RemoteControl.Operate`。
-5. Claim、Hold、Release 经中继到机端桥，再调用既有 Rust SDK。本地 SDK 握手身份必须匹配授权设备。
+5. `Claim`、`Hold`、`Release`、20–50Hz `Velocity` 遥操作与离散动作（`StandUp`、`SitDown`、`StopMotion`、`EmergencyStop`、`ClearEmergencyStop`、`Resume`、`EnableMotors`、`DisableMotors`、`SwitchProfile`）经中继到机端桥，再调用既有 Rust SDK；速度指令原样透传操作端采样时刻的 `input_window`（不覆盖、不积压），机端配有 `DOSO_CONTROL_VELOCITY_TIMEOUT_MS`（默认 300ms）速度看门狗超时自动 `Hold`。本地 SDK 握手身份必须匹配授权设备。
 6. 机端原样返回接纳结果、持权状态、最终输出确认和未知提交语义。释放、撤销、到期与断链结束对应本地流。
 
 创建结果包含 `deviceId`、`sessionId`、`expiresAt`、`grant` 和 `endpoint`。grant 是短期凭据，调用方仅在会话期间保管。关闭请求为 `{"action":"close","deviceId":"UUID","sessionId":"UUID"}`。
@@ -74,6 +74,7 @@ DOSO_CONTROL_CA                  optional PEM CA path
 DOSO_CONTROL_LOCAL_ENDPOINT
 DOSO_CONTROL_LOCAL_API_KEY
 DOSO_CONTROL_LOCAL_CA            optional PEM CA path
+DOSO_CONTROL_VELOCITY_TIMEOUT_MS optional (100..=1000, default 300)
 ```
 
 状态进程与 control 模式可作为两个 systemd 实例运行，分别承担状态上报和远控传输。两者读取同一用户云选择；关闭选择后退出。机端部署前需先完成正式 SDK Gateway 的 TLS、凭据与设备身份配置。
@@ -89,6 +90,6 @@ DOSO_CONTROL_LOCAL_CA            optional PEM CA path
 | 弱网与撤权 | 延迟、乱序、蜂窝断网、Wi-Fi/5G 切换、云重启及归属变更的实际停止时间通过验收 |
 | OTA | 云任务领取和回传、机端自动执行、真实启动槽、App 进度、成功升级与回滚均有研发机证据 |
 
-远控速度进入正式协议前，需把原始机器人输入窗口传到操作者并原样返回。桥接时重新获取窗口会改变旧输入的有效期，需要在速度实现中保留原语义。
+当前速度通道已在共享协议、云端中继与机端 `TeleopBridge` 中打通并原样保留 `input_window` 与 300ms 超时自动 `Hold`，下一步重点是在已升级的云端 Gateway、App 原生控制页及配备硬件的真机上完成弱网、抢占与停止时间验收。
 
 OTA 首包沿用 Brainstem 与配套 policy。详细发布与回滚工作记录在 `D:\DOSO\app-workspace\doso-app\docs\production\DOSO_OTA_IMPLEMENTATION_PLAN.md`。

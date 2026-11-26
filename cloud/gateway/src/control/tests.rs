@@ -220,6 +220,7 @@ async fn send_input(
                 session_id: session["sessionId"].as_str().unwrap().into(),
                 sequence,
                 action: action as i32,
+                ..Default::default()
             })),
         })
         .await
@@ -257,6 +258,7 @@ async fn grpc_claim_release_preserves_device_confirmation() {
             held_by_client: Some(action != rpc::Action::Release),
             final_output_confirmed: true,
             submission_unknown: false,
+            ..Default::default()
         };
         device
             .send(rpc::DeviceEvent {
@@ -779,4 +781,185 @@ async fn replacing_the_registered_key_closes_the_authenticated_connection() {
             .code(),
         Code::Unavailable,
     );
+}
+
+#[tokio::test]
+async fn velocity_streams_without_ack_stall_and_forwards_async_window_updates() {
+    let fixture = Fixture::new().await;
+    let (device, mut commands, _) = fixture.device().await;
+    let session = fixture.issue(&Uuid::new_v4().to_string()).await;
+    let (operator, mut replies) = fixture.operate(&session).await;
+    let session_id = session["sessionId"].as_str().unwrap().to_owned();
+    commands.message().await.unwrap().unwrap();
+
+    // Unsolicited window refresh pushed by the robot reaches the operator immediately.
+    device
+        .send(rpc::DeviceEvent {
+            event: Some(rpc::device_event::Event::Reply(rpc::ControlReply {
+                session_id: session_id.clone(),
+                sequence: 0,
+                accepted: true,
+                reason: "window_update".into(),
+                held_by_client: Some(true),
+                input_window: 2,
+                ..Default::default()
+            })),
+        })
+        .await
+        .unwrap();
+    let window_msg = tokio::time::timeout(Duration::from_secs(1), replies.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(window_msg.sequence, 0);
+    assert_eq!(window_msg.input_window, 2);
+    assert!(window_msg.accepted);
+
+    // Three back-to-back velocity commands flow without waiting for ACK, followed immediately by Hold.
+    for seq in 1..=3 {
+        operator
+            .send(rpc::OperatorInput {
+                input: Some(rpc::operator_input::Input::Command(rpc::ControlInput {
+                    session_id: session_id.clone(),
+                    sequence: seq,
+                    action: rpc::Action::Velocity as i32,
+                    velocity: Some(rpc::VelocityCommand {
+                        vx_m_s: 0.4 * seq as f64,
+                        vy_m_s: 0.0,
+                        yaw_rad_s: 0.1,
+                        deadman: true,
+                        manual_mode: false,
+                        input_window: 2,
+                    }),
+                    ..Default::default()
+                })),
+            })
+            .await
+            .unwrap();
+    }
+    send_input(&operator, &session, 4, rpc::Action::Hold).await;
+
+    for expected_seq in 1..=4 {
+        let Some(rpc::device_command::Command::Input(cmd)) =
+            tokio::time::timeout(Duration::from_secs(1), commands.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .command
+        else {
+            panic!("expected command {expected_seq}");
+        };
+        assert_eq!(cmd.sequence, expected_seq);
+    }
+
+    // Deliver reply for Hold (seq 4) and out-of-order reply for velocity (seq 2).
+    for (seq, ingress_accepted) in [(2, true), (4, false)] {
+        device
+            .send(rpc::DeviceEvent {
+                event: Some(rpc::device_event::Event::Reply(rpc::ControlReply {
+                    session_id: session_id.clone(),
+                    sequence: seq,
+                    accepted: true,
+                    reason: "ok".into(),
+                    input_window: 2,
+                    ingress_accepted,
+                    final_output_confirmed: seq == 4,
+                    ..Default::default()
+                })),
+            })
+            .await
+            .unwrap();
+    }
+    let r2 = replies.message().await.unwrap().unwrap();
+    assert_eq!(r2.sequence, 2);
+    assert!(r2.ingress_accepted);
+    let r4 = replies.message().await.unwrap().unwrap();
+    assert_eq!(r4.sequence, 4);
+    assert!(r4.final_output_confirmed);
+}
+
+#[tokio::test]
+async fn invalid_velocity_and_profile_payloads_are_rejected_at_gateway() {
+    let fixture = Fixture::new().await;
+    let (_device, mut commands, _) = fixture.device().await;
+    let cases = [
+        rpc::ControlInput {
+            session_id: String::new(),
+            sequence: 1,
+            action: rpc::Action::Velocity as i32,
+            velocity: Some(rpc::VelocityCommand {
+                vx_m_s: 0.5,
+                vy_m_s: 0.0,
+                yaw_rad_s: 0.0,
+                deadman: true,
+                manual_mode: false,
+                input_window: 0,
+            }),
+            ..Default::default()
+        },
+        rpc::ControlInput {
+            session_id: String::new(),
+            sequence: 1,
+            action: rpc::Action::Velocity as i32,
+            velocity: Some(rpc::VelocityCommand {
+                vx_m_s: f64::NAN,
+                vy_m_s: 0.0,
+                yaw_rad_s: 0.0,
+                deadman: true,
+                manual_mode: false,
+                input_window: 1,
+            }),
+            ..Default::default()
+        },
+        rpc::ControlInput {
+            session_id: String::new(),
+            sequence: 1,
+            action: rpc::Action::Velocity as i32,
+            velocity: Some(rpc::VelocityCommand {
+                vx_m_s: 6.0,
+                vy_m_s: 0.0,
+                yaw_rad_s: 0.0,
+                deadman: true,
+                manual_mode: false,
+                input_window: 1,
+            }),
+            ..Default::default()
+        },
+        rpc::ControlInput {
+            session_id: String::new(),
+            sequence: 1,
+            action: rpc::Action::SwitchProfile as i32,
+            profile_name: "bad name".into(),
+            ..Default::default()
+        },
+        rpc::ControlInput {
+            session_id: String::new(),
+            sequence: 1,
+            action: rpc::Action::Hold as i32,
+            profile_name: "flat".into(),
+            ..Default::default()
+        },
+    ];
+    for mut bad in cases {
+        let session = fixture.issue(&Uuid::new_v4().to_string()).await;
+        let (operator, mut replies) = fixture.operate(&session).await;
+        commands.message().await.unwrap().unwrap();
+        bad.session_id = session["sessionId"].as_str().unwrap().into();
+        operator
+            .send(rpc::OperatorInput {
+                input: Some(rpc::operator_input::Input::Command(bad)),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            replies.message().await.unwrap_err().code(),
+            Code::InvalidArgument
+        );
+        assert!(matches!(
+            commands.message().await.unwrap().unwrap().command,
+            Some(rpc::device_command::Command::CloseSession(_))
+        ));
+    }
 }

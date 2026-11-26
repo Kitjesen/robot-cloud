@@ -98,6 +98,7 @@ pub async fn run(path: &Path) -> Result<()> {
                     session_id: session.session_id.clone(),
                     sequence,
                     action: action as i32,
+                    ..Default::default()
                 })),
             })
             .await?;
