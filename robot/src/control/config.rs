@@ -1,9 +1,15 @@
 use anyhow::{Context, Result, ensure};
 use doso_sdk::Config as SdkConfig;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use robot_cloud_common::{is_uuid, load_signing_key, load_verifying_key};
+use robot_cloud_common::{
+    control::{MAX_VELOCITY_TIMEOUT_MS, MIN_VELOCITY_TIMEOUT_MS, parse_velocity_timeout},
+    is_uuid, load_signing_key, load_verifying_key,
+};
 use std::{env, fs, net::IpAddr, time::Duration};
-use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
+use tonic::{
+    metadata::{Ascii, MetadataValue},
+    transport::{Certificate, ClientTlsConfig, Endpoint},
+};
 
 pub struct Config {
     pub device_id: String,
@@ -14,10 +20,16 @@ pub struct Config {
     pub local_endpoint: String,
     pub local_api_key: String,
     pub local_ca: Option<Vec<u8>>,
+    pub velocity_timeout: Duration,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self> {
+        let velocity_timeout = match env::var("DOSO_CONTROL_VELOCITY_TIMEOUT_MS") {
+            Ok(value) => parse_velocity_timeout(Some(&value))?,
+            Err(env::VarError::NotPresent) => parse_velocity_timeout(None)?,
+            Err(_) => anyhow::bail!("invalid_control_velocity_timeout"),
+        };
         let config = Self {
             device_id: env::var("DOSO_DEVICE_ID")?,
             signing_key: load_signing_key(&env::var("DOSO_DEVICE_SIGNING_KEY")?)?,
@@ -27,6 +39,7 @@ impl Config {
             local_endpoint: env::var("DOSO_CONTROL_LOCAL_ENDPOINT")?,
             local_api_key: env::var("DOSO_CONTROL_LOCAL_API_KEY")?,
             local_ca: certificate("DOSO_CONTROL_LOCAL_CA")?,
+            velocity_timeout,
         };
         config.validate()?;
         Ok(config)
@@ -40,23 +53,36 @@ impl Config {
         );
         validate_url(&self.cloud_url)?;
         validate_url(&self.local_endpoint)?;
+        ensure!(
+            (Duration::from_millis(MIN_VELOCITY_TIMEOUT_MS)
+                ..=Duration::from_millis(MAX_VELOCITY_TIMEOUT_MS))
+                .contains(&self.velocity_timeout),
+            "invalid_control_velocity_timeout"
+        );
         Ok(())
     }
 
     pub(super) fn endpoint(&self) -> Result<Endpoint> {
-        let mut endpoint =
-            Endpoint::from_shared(self.cloud_url.clone())?.connect_timeout(Duration::from_secs(5));
-        if self.cloud_url.starts_with("https://") {
-            let mut tls = ClientTlsConfig::new().with_native_roots();
-            if let Some(certificate) = &self.cloud_ca {
-                ensure!(!certificate.is_empty(), "empty_control_ca");
-                tls = tls.ca_certificate(Certificate::from_pem(certificate));
-            }
-            endpoint = endpoint.tls_config(tls)?;
-        } else {
-            ensure!(self.cloud_ca.is_none(), "control_ca_requires_tls");
-        }
-        Ok(endpoint)
+        build_endpoint(
+            &self.cloud_url,
+            self.cloud_ca.as_deref(),
+            Duration::from_secs(5),
+        )
+    }
+
+    pub(super) fn local_channel_endpoint(&self) -> Result<Endpoint> {
+        build_endpoint(
+            &self.local_endpoint,
+            self.local_ca.as_deref(),
+            Duration::from_secs(2),
+        )
+    }
+
+    pub(super) fn local_api_key_metadata(&self) -> Result<MetadataValue<Ascii>> {
+        let mut value = MetadataValue::try_from(self.local_api_key.as_str())
+            .context("invalid_local_api_key")?;
+        value.set_sensitive(true);
+        Ok(value)
     }
 
     pub(super) fn sdk(&self, session_id: &str) -> SdkConfig {
@@ -67,6 +93,21 @@ impl Config {
         config.timeout = Duration::from_secs(2);
         config
     }
+}
+
+fn build_endpoint(url: &str, ca: Option<&[u8]>, timeout: Duration) -> Result<Endpoint> {
+    let mut endpoint = Endpoint::from_shared(url.to_owned())?.connect_timeout(timeout);
+    if url.starts_with("https://") {
+        let mut tls = ClientTlsConfig::new().with_native_roots();
+        if let Some(certificate) = ca {
+            ensure!(!certificate.is_empty(), "empty_control_ca");
+            tls = tls.ca_certificate(Certificate::from_pem(certificate));
+        }
+        endpoint = endpoint.tls_config(tls)?;
+    } else {
+        ensure!(ca.is_none(), "control_ca_requires_tls");
+    }
+    Ok(endpoint)
 }
 
 fn certificate(name: &str) -> Result<Option<Vec<u8>>> {

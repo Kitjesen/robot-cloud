@@ -15,5 +15,5 @@ __pycache__/
 *.jks
 *.keystore
 *.local.json
-artifacts/robot-cloud/releases/
+artifacts/
 *.tar.gz

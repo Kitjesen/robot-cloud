@@ -132,6 +132,19 @@ scp -P 22003 local-file sunrise@127.0.0.1:/tmp/
   3. 双击 `field-provision-thunder-dev-001.bat`（自动扫描机器 IP，按提示回车使用默认凭据，约 30 秒完成安装并自动删除机端临时令牌）；
   4. 看到绿色 `DONE` 后，即可在 `47.103.89.137` 通过 `ssh -p 22001 sunrise@127.0.0.1` 永久接管研发机 1。
 
+### 5.3 经反向通道一键远程补装 `doso-ota`（研发机 1 及后续在线机器）
+已在阿里云 `47.103.89.137` 预置好经 3 号机验证的 ARM64 `doso-ota` 程序（`/opt/doso/ota-staging/doso-ota-aarch64`，SHA-256：`bef38cd30e9f0e4916a997dee6ffaba36c4d78bf59df2d94213ca8e3d0877d87`）与自动化安装脚本 `/opt/doso/bin/install-ota-via-tunnel.sh`（源码同步保存在 [install-ota-via-tunnel.sh](../tools/ops-tunnel/install-ota-via-tunnel.sh)）。
+
+只要目标机器开机上线（对应回环端口出现监听），在 `47.103.89.137` 上执行一条命令即可自动完成硬件型号探测、云端 `/etc/doso/ota-release/devices.json` 动态登记（免重启云服务）、分发公钥与凭据、按组件槽位安装启动 `doso-ota.service` 并校验 `127.0.0.1:13147/health`：
+
+```bash
+# 研发机 1 下次开机上线后执行（耗时约 5 秒）
+sudo /opt/doso/bin/install-ota-via-tunnel.sh \
+  --port 22001 \
+  --device-id d82a831a-2e86-4b46-975b-3d42473583b7 \
+  --model "THUNDER 01"
+```
+
 ---
 
 ## 六、回滚方案

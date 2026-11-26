@@ -29,16 +29,16 @@ Canonical end-to-end operations guide for `doso-ota` (robot), `doso-ota-release`
 
 ### 2.2 Device Provisioning (Release Registry vs Gateway Registry)
 
-`doso-ota-release` uses a **map** in `/etc/doso/ota-release/devices.json` (`ring` is `dev | canary | prod`), distinct from Gateway's `{"devices": [...]}` array. Provision cleanly with:
+`doso-ota-release` uses a **map** in `/etc/doso/ota-release/devices.json` (`ring` is `dev | canary | prod`), distinct from Gateway's `{"devices": [...]}` array. Always generate a fresh random RFC 4122 UUID v4 (`python3 -c "import uuid; print(uuid.uuid4())"`) for every new or re-enrolled robot (do not copy IP-suffix placeholder UUIDs such as legacy Dog3 `1313...`):
 
 ```bash
 python tools/deploy/doso-ota-ops.py provision-device \
   --devices-file /tmp/devices.json \
-  --device-id 13131313-1313-4131-8131-131313131313 \
+  --device-id <device-uuid-v4> \
   --model "THUNDER 01" \
   --hardware-revision rdk-s100p \
   --ring canary \
-  --tag dog3 --tag rdk-s100p
+  --tag rdk-s100p
 ```
 
 Validate on ECS before replacing `/etc/doso/ota-release/devices.json` (`root:doso-release 0640`). `doso-ota-release` hot-reloads `devices.json` on each request without restart.
@@ -49,7 +49,7 @@ Render a clean template without embedded secrets using:
 
 ```bash
 python tools/deploy/doso-ota-ops.py render-robot-env \
-  --device-id 13131313-1313-4131-8131-131313131313 \
+  --device-id <device-uuid-v4> \
   --brainstem-version 0.0.3 \
   --brainstem-release v0.0.3 \
   --verify-key /etc/doso/ota-release-signing.pub.pem \
@@ -161,9 +161,9 @@ For single-robot acceptance before a fleet rollout, trigger an idempotent single
 
 ```bash
 python tools/deploy/doso-ota-ops.py job start \
-  --device-id 13131313-1313-4131-8131-131313131313 \
+  --device-id <device-uuid-v4> \
   --release-id bs-0.0.4 \
-  --idempotency-key accept-dog3-bs-0.0.4
+  --idempotency-key accept-bs-0.0.4
 ```
 
 ## 4. Production Cutover Status (`https://api.dosorobotics.com/ota`)

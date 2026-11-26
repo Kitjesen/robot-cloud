@@ -1,14 +1,14 @@
 use crate::Gateway;
 use ed25519_dalek::VerifyingKey;
 use robot_cloud_common::{
-    control::{Grant, SESSION_MS, rpc},
+    control::{Grant, SESSION_MS, rpc, validate_control_input},
     decode_signed, encode_signed, is_uuid, now_ms, parse_time,
     reporting::MAX_COUNTER,
     timestamp,
 };
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -22,10 +22,13 @@ use uuid::Uuid;
 type Commands = mpsc::Sender<Result<rpc::DeviceCommand, Status>>;
 type Replies = mpsc::Sender<Result<rpc::ControlReply, Status>>;
 
+const MAX_IN_FLIGHT_VELOCITY_SEQUENCES: usize = 128;
+
 struct Pending {
     sequence: u64,
     action: rpc::Action,
     sent: Instant,
+    timeout: Duration,
 }
 
 struct Session {
@@ -36,6 +39,7 @@ struct Session {
     replies: Option<Replies>,
     last_sequence: u64,
     pending: Option<Pending>,
+    velocity_sequences: VecDeque<u64>,
     ended: watch::Sender<bool>,
 }
 
@@ -146,6 +150,7 @@ impl Hub {
             replies: None,
             last_sequence: 0,
             pending: None,
+            velocity_sequences: VecDeque::new(),
             ended,
         });
         Ok(issued)
@@ -219,10 +224,8 @@ impl Hub {
         self.gateway
             .device_key(&grant.device_id)
             .map_err(|_| Status::permission_denied("device_disabled"))?;
-        let action = rpc::Action::try_from(input.action)
-            .ok()
-            .filter(|action| *action != rpc::Action::Unspecified)
-            .ok_or_else(|| Status::invalid_argument("invalid_control_action"))?;
+        let action = validate_control_input(&input)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let mut devices = self.devices.lock().unwrap();
         let device = devices
             .get_mut(&grant.device_id)
@@ -244,18 +247,33 @@ impl Hub {
         if session.pending.is_some() {
             return Err(Status::resource_exhausted("control_ack_pending"));
         }
-        session.pending = Some(Pending {
-            sequence: input.sequence,
-            action,
-            sent: Instant::now(),
-        });
-        session.last_sequence = input.sequence;
-        device
-            .commands
-            .try_send(Ok(rpc::DeviceCommand {
-                command: Some(rpc::device_command::Command::Input(input)),
-            }))
-            .map_err(|_| Status::unavailable("device_send_unavailable"))
+        let sequence = input.sequence;
+        let send_res = device.commands.try_send(Ok(rpc::DeviceCommand {
+            command: Some(rpc::device_command::Command::Input(input)),
+        }));
+        if let Err(error) = send_res {
+            return match error {
+                mpsc::error::TrySendError::Full(_) if action == rpc::Action::Velocity => {
+                    Err(Status::resource_exhausted("velocity_backpressure"))
+                }
+                _ => Err(Status::unavailable("device_send_unavailable")),
+            };
+        }
+        session.last_sequence = sequence;
+        if action == rpc::Action::Velocity {
+            if session.velocity_sequences.len() >= MAX_IN_FLIGHT_VELOCITY_SEQUENCES {
+                session.velocity_sequences.pop_front();
+            }
+            session.velocity_sequences.push_back(sequence);
+        } else {
+            session.pending = Some(Pending {
+                sequence,
+                action,
+                sent: Instant::now(),
+                timeout: action_timeout(action),
+            });
+        }
+        Ok(())
     }
 
     pub(super) fn reply(
@@ -279,6 +297,27 @@ impl Hub {
         if reply.session_id != session.grant.session_id {
             return Ok(());
         }
+        if reply.reason.len() > 512 {
+            return Err(Status::invalid_argument("invalid_control_ack"));
+        }
+        // Unsolicited input-window refresh pushed by the robot before an explicit request.
+        if reply.sequence == 0 && reply.accepted && reply.input_window != 0 {
+            if let Some(replies) = &session.replies {
+                let _ = replies.try_send(Ok(reply));
+            }
+            return Ok(());
+        }
+        if let Some(pos) = session
+            .velocity_sequences
+            .iter()
+            .position(|&seq| seq == reply.sequence)
+        {
+            session.velocity_sequences.remove(pos);
+            if let Some(replies) = &session.replies {
+                let _ = replies.try_send(Ok(reply));
+            }
+            return Ok(());
+        }
         let Some(pending) = session.pending.as_ref() else {
             return if reply.sequence <= session.last_sequence {
                 Ok(())
@@ -289,7 +328,7 @@ impl Hub {
         if reply.sequence < pending.sequence {
             return Ok(());
         }
-        if reply.sequence != pending.sequence || reply.reason.len() > 512 {
+        if reply.sequence != pending.sequence {
             return Err(Status::invalid_argument("invalid_control_ack"));
         }
         let release = pending.action == rpc::Action::Release;
@@ -365,6 +404,17 @@ impl Hub {
     }
 }
 
+fn action_timeout(action: rpc::Action) -> Duration {
+    match action {
+        rpc::Action::StandUp
+        | rpc::Action::SitDown
+        | rpc::Action::EnableMotors
+        | rpc::Action::DisableMotors
+        | rpc::Action::SwitchProfile => Duration::from_secs(16),
+        _ => Duration::from_secs(3),
+    }
+}
+
 fn expire(device: &mut Device) {
     if device.session.as_ref().is_some_and(|session| {
         Instant::now() >= session.expires
@@ -372,7 +422,7 @@ fn expire(device: &mut Device) {
             || session
                 .pending
                 .as_ref()
-                .is_some_and(|pending| pending.sent.elapsed() >= Duration::from_secs(3))
+                .is_some_and(|pending| pending.sent.elapsed() >= pending.timeout)
     }) {
         close_session(
             device,

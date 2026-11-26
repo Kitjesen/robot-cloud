@@ -58,7 +58,7 @@ impl rpc::remote_control_server::RemoteControl for Relay {
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("device_authentication_busy"))?;
         let challenge = Uuid::new_v4().to_string();
-        let (commands, output) = mpsc::channel(8);
+        let (commands, output) = mpsc::channel(16);
         commands
             .try_send(Ok(rpc::DeviceCommand {
                 command: Some(rpc::device_command::Command::Challenge(challenge.clone())),
@@ -125,7 +125,7 @@ impl rpc::remote_control_server::RemoteControl for Relay {
         let Some(rpc::operator_input::Input::Grant(bytes)) = first.input else {
             return Err(Status::unauthenticated("control_grant_required"));
         };
-        let (replies, output) = mpsc::channel(8);
+        let (replies, output) = mpsc::channel(32);
         let (grant, mut ended) = self.0.attach(&bytes, replies.clone())?;
         replies
             .try_send(Ok(rpc::ControlReply {

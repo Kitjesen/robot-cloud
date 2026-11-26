@@ -3,6 +3,7 @@ use robot_cloud_common::{
     control::{
         Grant,
         rpc::{Action, ControlInput},
+        validate_control_input,
     },
     parse_time,
 };
@@ -36,8 +37,7 @@ impl Lease {
                 && input.sequence <= robot_cloud_common::reporting::MAX_COUNTER,
             "invalid_control_sequence"
         );
-        let action = Action::try_from(input.action)?;
-        ensure!(action != Action::Unspecified, "unsupported_control_action");
+        let action = validate_control_input(input)?;
         self.sequence = input.sequence;
         Ok(action)
     }
@@ -46,7 +46,7 @@ impl Lease {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use robot_cloud_common::{control::SESSION_MS, timestamp};
+    use robot_cloud_common::{control::SESSION_MS, control::rpc::VelocityCommand, timestamp};
 
     fn grant(now: i64) -> Grant {
         Grant {
@@ -72,6 +72,7 @@ mod tests {
             session_id: grant.session_id,
             sequence: 1,
             action: Action::Claim as i32,
+            ..Default::default()
         };
         assert_eq!(lease.accept(&input, now).unwrap(), Action::Claim);
         assert!(lease.accept(&input, now).is_err());
@@ -85,18 +86,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_action_does_not_advance_sequence() {
+    async fn invalid_action_or_payload_does_not_advance_sequence() {
         let now = 1_793_616_000_000;
         let grant = grant(now);
         let mut lease =
             Lease::new(grant.clone(), &grant.device_id, &grant.connection_id, now).unwrap();
-        let mut input = ControlInput {
-            session_id: grant.session_id,
+        let bad_action = ControlInput {
+            session_id: grant.session_id.clone(),
             sequence: 1,
             action: 99,
+            ..Default::default()
         };
-        assert!(lease.accept(&input, now).is_err());
-        input.action = Action::Release as i32;
-        assert_eq!(lease.accept(&input, now).unwrap(), Action::Release);
+        assert!(lease.accept(&bad_action, now).is_err());
+        let bad_vel_window = ControlInput {
+            session_id: grant.session_id.clone(),
+            sequence: 1,
+            action: Action::Velocity as i32,
+            velocity: Some(VelocityCommand {
+                vx_m_s: 0.5,
+                vy_m_s: 0.0,
+                yaw_rad_s: 0.0,
+                deadman: true,
+                manual_mode: false,
+                input_window: 0,
+            }),
+            ..Default::default()
+        };
+        assert!(lease.accept(&bad_vel_window, now).is_err());
+        let bad_vel_nan = ControlInput {
+            session_id: grant.session_id.clone(),
+            sequence: 1,
+            action: Action::Velocity as i32,
+            velocity: Some(VelocityCommand {
+                vx_m_s: f64::NAN,
+                vy_m_s: 0.0,
+                yaw_rad_s: 0.0,
+                deadman: true,
+                manual_mode: false,
+                input_window: 1,
+            }),
+            ..Default::default()
+        };
+        assert!(lease.accept(&bad_vel_nan, now).is_err());
+        let bad_profile = ControlInput {
+            session_id: grant.session_id.clone(),
+            sequence: 1,
+            action: Action::SwitchProfile as i32,
+            profile_name: "invalid space".into(),
+            ..Default::default()
+        };
+        assert!(lease.accept(&bad_profile, now).is_err());
+        let release = ControlInput {
+            session_id: grant.session_id,
+            sequence: 1,
+            action: Action::Release as i32,
+            ..Default::default()
+        };
+        assert_eq!(lease.accept(&release, now).unwrap(), Action::Release);
     }
 }
