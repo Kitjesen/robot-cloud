@@ -122,6 +122,11 @@ fn setup_release_updater(
         releases_dir: Some(releases_dir.clone()),
         current_link: Some(current_link.clone()),
         last_good_link: Some(last_good_link.clone()),
+        components_root: None,
+        keep_history: 2,
+        require_can_read_only: false,
+        min_vbus_v: 44.0,
+        ota_unit: "doso-ota.service".into(),
         policy_admin_url,
         policy_admin_token,
         allow_insecure_http_loopback: true,
@@ -251,6 +256,12 @@ async fn channel_a_release_install_flips_current_symlink_and_commits_on_healthy_
         policy_slot: None,
         shadow_frames: None,
         activate: None,
+        component: None,
+        systemd_unit: None,
+        health_url: None,
+        requires: Default::default(),
+        bundle_items: Vec::new(),
+        delta: None,
     };
     let envelope = sign_manifest(&manifest, &key);
     updater.schedule(&envelope, "idem-chan-a-ok").unwrap();
@@ -365,6 +376,12 @@ async fn channel_a_failed_health_automatically_rolls_back_to_last_known_good() {
         policy_slot: None,
         shadow_frames: None,
         activate: None,
+        component: None,
+        systemd_unit: None,
+        health_url: None,
+        requires: Default::default(),
+        bundle_items: Vec::new(),
+        delta: None,
     };
     let envelope = sign_manifest(&manifest, &key);
     updater.schedule(&envelope, "idem-chan-a-rb").unwrap();
@@ -544,6 +561,12 @@ async fn channel_b_policy_hot_push_zero_restart_and_failure_auto_rollback() {
             policy_slot: Some("flat".into()),
             shadow_frames: Some(50),
             activate: Some(true),
+            component: None,
+            systemd_unit: None,
+            health_url: None,
+            requires: Default::default(),
+            bundle_items: Vec::new(),
+            delta: None,
         }
     };
 
@@ -681,6 +704,12 @@ async fn cloud_poll_executes_and_reports_progress_and_recovers_interrupted_boot(
                         policy_slot: Some("stairs".into()),
                         shadow_frames: Some(50),
                         activate: Some(true),
+                        component: None,
+                        systemd_unit: None,
+                        health_url: None,
+                        requires: Default::default(),
+                        bundle_items: Vec::new(),
+                        delta: None,
                     };
                     let envelope = sign_manifest(&manifest, &key);
                     (
@@ -795,6 +824,12 @@ async fn startup_recovery_finishes_interrupted_rebooting_job_and_rolls_back_on_f
         policy_slot: None,
         shadow_frames: None,
         activate: None,
+        component: None,
+        systemd_unit: None,
+        health_url: None,
+        requires: Default::default(),
+        bundle_items: Vec::new(),
+        delta: None,
     };
     let persisted = doso_ota::Job {
         job_id: "job-crash-rec".into(),
@@ -876,6 +911,667 @@ async fn startup_recovery_finishes_interrupted_rebooting_job_and_rolls_back_on_f
     assert_eq!(
         read_link_target(&current_link).unwrap(),
         releases_dir.join("1.0.0-rust")
+    );
+
+    srv.abort();
+}
+
+struct UnitRecordingRestarter {
+    units: StdMutex<Vec<String>>,
+}
+
+impl UnitRecordingRestarter {
+    fn new() -> Self {
+        Self {
+            units: StdMutex::new(Vec::new()),
+        }
+    }
+
+    fn units(&self) -> Vec<String> {
+        self.units.lock().unwrap().clone()
+    }
+
+    fn count_for(&self, unit: &str) -> usize {
+        self.units
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|u| u.as_str() == unit)
+            .count()
+    }
+}
+
+impl ServiceRestarter for UnitRecordingRestarter {
+    fn restart(&self, unit: &str) -> anyhow::Result<()> {
+        self.units.lock().unwrap().push(unit.to_owned());
+        Ok(())
+    }
+}
+
+fn build_component_bundle(tmp: &Path, bin_name: &str, payload: &[u8]) -> Vec<u8> {
+    let src = tmp.join(format!("comp_src_{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(src.join("bin")).unwrap();
+    fs::write(src.join("bin").join(bin_name), payload).unwrap();
+    let hash = Manifest::artifact_hash(payload);
+    fs::write(src.join("SHA256SUMS"), format!("{hash}  bin/{bin_name}\n")).unwrap();
+    let archive = tmp.join(format!("comp_{}.tar.gz", uuid::Uuid::new_v4()));
+    make_tar_gz(&src, &archive)
+}
+
+#[tokio::test]
+async fn multi_component_install_never_restarts_brainstem_rolls_back_and_runs_gc() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = SigningKey::from_bytes(&[31; 32]);
+    let key_path = dir.path().join("pub.pem");
+    fs::write(
+        &key_path,
+        key.verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap(),
+    )
+    .unwrap();
+
+    let components_root = dir.path().join("opt/doso/components");
+    let cl_releases = components_root.join("cloud-link/releases");
+    for old_ver in ["0.0.1", "0.0.2", "0.0.3", "0.0.4"] {
+        let p = cl_releases.join(old_ver);
+        fs::create_dir_all(p.join("bin")).unwrap();
+        fs::write(p.join("bin/doso-cloud-link"), old_ver.as_bytes()).unwrap();
+    }
+    let cl_current = components_root.join("cloud-link/current");
+    let cl_last_good = components_root.join("cloud-link/last-known-good");
+    atomic_swap_link(&cl_current, &cl_releases.join("0.0.4")).unwrap();
+    atomic_swap_link(&cl_last_good, &cl_releases.join("0.0.4")).unwrap();
+
+    let restarter = Arc::new(UnitRecordingRestarter::new());
+    let cfg = UpdaterConfig {
+        root: dir.path().join("var/lib/doso-ota"),
+        device_id: "dev-mc-01".into(),
+        model: "THUNDER 01".into(),
+        hardware_revision: "rdk-s100p".into(),
+        bootloader_version: "1.0.0".into(),
+        brainstem_version: "1.0.0-rust".into(),
+        current_version: "1.0.0-rust".into(),
+        battery_percent: 90,
+        online: true,
+        task_running: false,
+        boot_id_path: dir.path().join("run/boot_id"),
+        verify_key_path: key_path,
+        brainstem_unit: "doso-brainstem.service".into(),
+        staging_dir: Some(dir.path().join("ota/staging")),
+        releases_dir: None,
+        current_link: None,
+        last_good_link: None,
+        components_root: Some(components_root.clone()),
+        keep_history: 2,
+        require_can_read_only: false,
+        min_vbus_v: 44.0,
+        ota_unit: "doso-ota.service".into(),
+        policy_admin_url: None,
+        policy_admin_token: None,
+        allow_insecure_http_loopback: true,
+    };
+    let updater = Updater::with_restarter(cfg, restarter.clone()).unwrap();
+
+    let good_bundle = Arc::new(build_component_bundle(
+        dir.path(),
+        "doso-cloud-link",
+        b"cloud-link-0.1.0",
+    ));
+    let bad_bundle = Arc::new(build_component_bundle(
+        dir.path(),
+        "doso-cloud-link",
+        b"cloud-link-0.2.0-broken",
+    ));
+    let good_srv = good_bundle.clone();
+    let bad_srv = bad_bundle.clone();
+    let fail_health = Arc::new(AtomicBool::new(false));
+    let fail_health_srv = fail_health.clone();
+    let restarter_srv = restarter.clone();
+
+    let app = Router::new()
+        .route(
+            "/cloud-link-good.tar.gz",
+            get(move || {
+                let b = good_srv.clone();
+                async move { b.as_ref().clone() }
+            }),
+        )
+        .route(
+            "/cloud-link-bad.tar.gz",
+            get(move || {
+                let b = bad_srv.clone();
+                async move { b.as_ref().clone() }
+            }),
+        )
+        .route(
+            "/cl-health",
+            get(move || {
+                let fail = fail_health_srv.load(Ordering::SeqCst);
+                let cl_restarts = restarter_srv.count_for("doso-cloud-link.service");
+                async move {
+                    if fail && cl_restarts == 2 {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(serde_json::json!({ "ok": false })),
+                        )
+                    } else if cl_restarts >= 3 {
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({ "ok": true, "version": "0.1.0" })),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({ "ok": true, "version": "0.1.0", "releaseId": "cl-0.1.0" })),
+                        )
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let now = now_ms();
+    let mut m1 = Manifest {
+        manifest_version: 1,
+        release_id: "cl-0.1.0".into(),
+        channel: "qa".into(),
+        sequence: 1,
+        version: "0.1.0".into(),
+        issued_at_ms: now - 1000,
+        expires_at_ms: now + 60_000,
+        model: "THUNDER 01".into(),
+        hardware_revision: "rdk-s100p".into(),
+        minimum_bootloader_version: "1.0.0".into(),
+        minimum_brainstem_version: "1.0.0".into(),
+        minimum_battery_percent: 20,
+        artifact_url: format!("http://{addr}/cloud-link-good.tar.gz"),
+        artifact_size_bytes: good_bundle.len() as u64,
+        artifact_sha256: Manifest::artifact_hash(&good_bundle),
+        key_id: "k1".into(),
+        rollback_policy: RollbackPolicy {
+            mode: "automatic".into(),
+            health_timeout_ms: 200,
+        },
+        artifact_type: ArtifactType::ComponentRelease,
+        policy_slot: None,
+        shadow_frames: None,
+        activate: None,
+        component: Some("cloud-link".into()),
+        systemd_unit: Some("doso-cloud-link.service".into()),
+        health_url: Some(format!("http://{addr}/cl-health")),
+        requires: std::collections::BTreeMap::from([("brainstem".into(), "1.0.0".into())]),
+        bundle_items: Vec::new(),
+        delta: None,
+    };
+    updater
+        .schedule(&sign_manifest(&m1, &key), "idem-cl-1")
+        .unwrap();
+    let job1 = updater
+        .execute_active_job::<SystemHealthCheck, _>(None, Duration::from_millis(20), |_| {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job1.phase, JobPhase::Succeeded);
+    assert_eq!(restarter.count_for("doso-cloud-link.service"), 1);
+    assert_eq!(
+        restarter.count_for("doso-brainstem.service"),
+        0,
+        "upgrading cloud-link must NEVER restart doso-brainstem"
+    );
+    assert_eq!(
+        updater.component_version("cloud-link").as_deref(),
+        Some("0.1.0")
+    );
+    assert_eq!(
+        read_link_target(&cl_current).unwrap(),
+        cl_releases.join("0.1.0")
+    );
+    // GC kept current/last-good (0.1.0) + 2 newest history (0.0.4, 0.0.3) and deleted 0.0.1, 0.0.2!
+    assert!(cl_releases.join("0.1.0").is_dir());
+    assert!(cl_releases.join("0.0.4").is_dir());
+    assert!(cl_releases.join("0.0.3").is_dir());
+    assert!(!cl_releases.join("0.0.2").exists());
+    assert!(!cl_releases.join("0.0.1").exists());
+    // Staging artifact cleaned up after commit.
+    assert!(
+        !dir.path()
+            .join(format!("ota/staging/{}.artifact", job1.job_id))
+            .exists()
+    );
+
+    // 2) Bad cloud-link release fails health -> auto-rolls back to 0.1.0, still 0 brainstem restarts!
+    fail_health.store(true, Ordering::SeqCst);
+    m1.release_id = "cl-0.2.0".into();
+    m1.sequence = 2;
+    m1.version = "0.2.0".into();
+    m1.artifact_url = format!("http://{addr}/cloud-link-bad.tar.gz");
+    m1.artifact_size_bytes = bad_bundle.len() as u64;
+    m1.artifact_sha256 = Manifest::artifact_hash(&bad_bundle);
+    updater
+        .schedule(&sign_manifest(&m1, &key), "idem-cl-2")
+        .unwrap();
+    let job2 = updater
+        .execute_active_job::<SystemHealthCheck, _>(None, Duration::from_millis(20), |_| {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job2.phase, JobPhase::RolledBack);
+    assert_eq!(restarter.count_for("doso-cloud-link.service"), 3);
+    assert_eq!(restarter.count_for("doso-brainstem.service"), 0);
+    assert_eq!(
+        read_link_target(&cl_current).unwrap(),
+        cl_releases.join("0.1.0")
+    );
+
+    srv.abort();
+}
+
+#[tokio::test]
+async fn real_robot_waiting_safe_window_blocks_while_walking_then_succeeds_with_can_read_only_false()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let key = SigningKey::from_bytes(&[32; 32]);
+    let restarter = Arc::new(CountingRestarter::new());
+    let (mut updater, releases_dir, current_link, _last_good_link) =
+        setup_release_updater(dir.path(), &key, None, None, restarter.clone());
+
+    let bundle_bytes = Arc::new(build_release_bundle(dir.path(), b"brainstem-real-v1.1.0"));
+    let bundle_srv = bundle_bytes.clone();
+    let is_walking = Arc::new(AtomicBool::new(true));
+    let walking_srv = is_walking.clone();
+    let restarter_srv = restarter.clone();
+
+    let app = Router::new()
+        .route(
+            "/real-brainstem.tar.gz",
+            get(move || {
+                let b = bundle_srv.clone();
+                async move { b.as_ref().clone() }
+            }),
+        )
+        .route(
+            "/health",
+            get(move || {
+                let walking = walking_srv.load(Ordering::SeqCst);
+                let restarts = restarter_srv.count();
+                async move {
+                    if walking {
+                        Json(serde_json::json!({
+                            "ok": true,
+                            "boot_id": "boot-v1",
+                            "version": "1.0.0-rust",
+                            "release_id": "rel-1.0.0",
+                            "brainstem_ready": true,
+                            "strategy_ready": true,
+                            "can_read_only": false,
+                            "motor_output_enabled": true,
+                            "cms_state": "walking",
+                            "vbus_min_v": 48.2,
+                            "battery_percent": 88
+                        }))
+                    } else if restarts == 0 {
+                        Json(serde_json::json!({
+                            "ok": true,
+                            "boot_id": "boot-v1",
+                            "version": "1.0.0-rust",
+                            "release_id": "rel-1.0.0",
+                            "brainstem_ready": true,
+                            "strategy_ready": true,
+                            "can_read_only": false,
+                            "motor_output_enabled": false,
+                            "cms_state": "grounded",
+                            "vbus_min_v": 48.2,
+                            "battery_percent": 88
+                        }))
+                    } else {
+                        // Real robot post-upgrade health: can_read_only=false, motors disabled!
+                        Json(serde_json::json!({
+                            "ok": true,
+                            "boot_id": "boot-v1.1.0",
+                            "version": "v1.1.0-rust",
+                            "release_id": "rel-real-1.1.0",
+                            "brainstem_ready": true,
+                            "strategy_ready": true,
+                            "can_read_only": false,
+                            "motor_output_enabled": false,
+                            "cms_state": "grounded",
+                            "online_mask": 65535,
+                            "imu_fresh": true,
+                            "vbus_min_v": 48.0,
+                            "battery_percent": 87
+                        }))
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let health_url = format!("http://{addr}/health");
+    updater.set_safety_check(Some(Arc::new(doso_ota::HttpSafetyPreCheck::new(
+        health_url.clone(),
+    ))));
+
+    let now = now_ms();
+    let manifest = Manifest {
+        manifest_version: 1,
+        release_id: "rel-real-1.1.0".into(),
+        channel: "stable".into(),
+        sequence: 2,
+        version: "1.1.0-rust".into(),
+        issued_at_ms: now - 1000,
+        expires_at_ms: now + 60_000,
+        model: "THUNDER 01".into(),
+        hardware_revision: "rdk-s100p".into(),
+        minimum_bootloader_version: "1.0.0".into(),
+        minimum_brainstem_version: "1.0.0".into(),
+        minimum_battery_percent: 30,
+        artifact_url: format!("http://{addr}/real-brainstem.tar.gz"),
+        artifact_size_bytes: bundle_bytes.len() as u64,
+        artifact_sha256: Manifest::artifact_hash(&bundle_bytes),
+        key_id: "k1".into(),
+        rollback_policy: RollbackPolicy {
+            mode: "automatic".into(),
+            health_timeout_ms: 2000,
+        },
+        artifact_type: ArtifactType::BrainstemRelease,
+        policy_slot: None,
+        shadow_frames: None,
+        activate: None,
+        component: None,
+        systemd_unit: None,
+        health_url: None,
+        requires: Default::default(),
+        bundle_items: Vec::new(),
+        delta: None,
+    };
+    updater
+        .schedule(&sign_manifest(&manifest, &key), "idem-real-safe")
+        .unwrap();
+
+    let health = Arc::new(SystemHealthCheck::simple_http(health_url));
+    // Tick 1: robot is walking -> downloads in background, parks cleanly in WaitingSafeWindow!
+    let tick1 = updater
+        .execute_active_job(Some(health.clone()), Duration::from_millis(20), |_| {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tick1.phase, JobPhase::WaitingSafeWindow);
+    assert_eq!(
+        restarter.count(),
+        0,
+        "must NOT restart brainstem while robot is walking"
+    );
+
+    // Robot sits down & disables motors -> Tick 2 installs, restarts, and passes with can_read_only=false!
+    is_walking.store(false, Ordering::SeqCst);
+    let tick2 = updater
+        .execute_active_job(Some(health), Duration::from_millis(20), |_| {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tick2.phase, JobPhase::Succeeded);
+    assert_eq!(restarter.count(), 1);
+    assert_eq!(
+        read_link_target(&current_link).unwrap(),
+        releases_dir.join("1.1.0-rust")
+    );
+    assert_eq!(updater.profile().current_version, "1.1.0-rust");
+
+    srv.abort();
+}
+
+#[tokio::test]
+async fn release_bundle_installs_in_order_and_rolls_back_all_items_on_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = SigningKey::from_bytes(&[33; 32]);
+    let key_path = dir.path().join("pub.pem");
+    fs::write(
+        &key_path,
+        key.verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap(),
+    )
+    .unwrap();
+
+    let components_root = dir.path().join("opt/doso/components");
+    let bs_v1 = components_root.join("brainstem/releases/1.0.0");
+    fs::create_dir_all(bs_v1.join("bin")).unwrap();
+    fs::write(bs_v1.join("bin/doso-brainstem"), b"bs-v1").unwrap();
+    atomic_swap_link(&components_root.join("brainstem/current"), &bs_v1).unwrap();
+    atomic_swap_link(&components_root.join("brainstem/last-known-good"), &bs_v1).unwrap();
+
+    let cl_v1 = components_root.join("cloud-link/releases/0.1.0");
+    fs::create_dir_all(cl_v1.join("bin")).unwrap();
+    fs::write(cl_v1.join("bin/doso-cloud-link"), b"cl-v1").unwrap();
+    atomic_swap_link(&components_root.join("cloud-link/current"), &cl_v1).unwrap();
+    atomic_swap_link(&components_root.join("cloud-link/last-known-good"), &cl_v1).unwrap();
+
+    let bs_pkg = Arc::new(build_release_bundle(dir.path(), b"bs-v1.2.0"));
+    let cl_pkg = Arc::new(build_component_bundle(
+        dir.path(),
+        "doso-cloud-link",
+        b"cl-v0.2.0",
+    ));
+    let bs_srv = bs_pkg.clone();
+    let cl_srv = cl_pkg.clone();
+    let fail_cl = Arc::new(AtomicBool::new(true));
+    let fail_cl_srv = fail_cl.clone();
+
+    let app = Router::new()
+        .route(
+            "/bs.tar.gz",
+            get(move || {
+                let b = bs_srv.clone();
+                async move { b.as_ref().clone() }
+            }),
+        )
+        .route(
+            "/cl.tar.gz",
+            get(move || {
+                let b = cl_srv.clone();
+                async move { b.as_ref().clone() }
+            }),
+        )
+        .route(
+            "/bs-health",
+            get(|| async {
+                Json(serde_json::json!({
+                    "ok": true,
+                    "version": "1.2.0",
+                    "brainstem_ready": true,
+                    "strategy_ready": true,
+                    "can_read_only": false,
+                    "motor_output_enabled": false
+                }))
+            }),
+        )
+        .route(
+            "/cl-health",
+            get(move || {
+                let fail = fail_cl_srv.load(Ordering::SeqCst);
+                async move {
+                    if fail {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(serde_json::json!({ "ok": false })),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({ "ok": true, "version": "0.2.0" })),
+                        )
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let restarter = Arc::new(UnitRecordingRestarter::new());
+    let cfg = UpdaterConfig {
+        root: dir.path().join("var/lib/doso-ota"),
+        device_id: "dev-bundle-01".into(),
+        model: "THUNDER 01".into(),
+        hardware_revision: "rdk-s100p".into(),
+        bootloader_version: "1.0.0".into(),
+        brainstem_version: "1.0.0".into(),
+        current_version: "1.0.0".into(),
+        battery_percent: 95,
+        online: true,
+        task_running: false,
+        boot_id_path: dir.path().join("run/boot_id"),
+        verify_key_path: key_path,
+        brainstem_unit: "doso-brainstem.service".into(),
+        staging_dir: Some(dir.path().join("ota/staging")),
+        releases_dir: None,
+        current_link: None,
+        last_good_link: None,
+        components_root: Some(components_root.clone()),
+        keep_history: 0,
+        require_can_read_only: false,
+        min_vbus_v: 44.0,
+        ota_unit: "doso-ota.service".into(),
+        policy_admin_url: None,
+        policy_admin_token: None,
+        allow_insecure_http_loopback: true,
+    };
+    let updater = Updater::with_restarter(cfg, restarter.clone()).unwrap();
+
+    let now = now_ms();
+    let make_bundle_manifest = |seq: u64| Manifest {
+        manifest_version: 1,
+        release_id: format!("bundle-{seq}"),
+        channel: "qa".into(),
+        sequence: seq,
+        version: format!("2.0.{seq}"),
+        issued_at_ms: now - 1000,
+        expires_at_ms: now + 60_000,
+        model: "THUNDER 01".into(),
+        hardware_revision: "rdk-s100p".into(),
+        minimum_bootloader_version: "1.0.0".into(),
+        minimum_brainstem_version: "1.0.0".into(),
+        minimum_battery_percent: 20,
+        artifact_url: String::new(),
+        artifact_size_bytes: 0,
+        artifact_sha256: String::new(),
+        key_id: "k1".into(),
+        rollback_policy: RollbackPolicy {
+            mode: "automatic".into(),
+            health_timeout_ms: 150,
+        },
+        artifact_type: ArtifactType::ReleaseBundle,
+        policy_slot: None,
+        shadow_frames: None,
+        activate: None,
+        component: None,
+        systemd_unit: None,
+        health_url: None,
+        requires: Default::default(),
+        bundle_items: vec![
+            doso_ota::BundleItem {
+                component: "brainstem".into(),
+                version: "1.2.0".into(),
+                artifact_url: format!("http://{addr}/bs.tar.gz"),
+                artifact_size_bytes: bs_pkg.len() as u64,
+                artifact_sha256: Manifest::artifact_hash(&bs_pkg),
+                systemd_unit: Some("doso-brainstem.service".into()),
+                health_url: None,
+                requires: Default::default(),
+                delta: None,
+            },
+            doso_ota::BundleItem {
+                component: "cloud-link".into(),
+                version: "0.2.0".into(),
+                artifact_url: format!("http://{addr}/cl.tar.gz"),
+                artifact_size_bytes: cl_pkg.len() as u64,
+                artifact_sha256: Manifest::artifact_hash(&cl_pkg),
+                systemd_unit: Some("doso-cloud-link.service".into()),
+                health_url: Some(format!("http://{addr}/cl-health")),
+                requires: std::collections::BTreeMap::from([("brainstem".into(), "1.2.0".into())]),
+                delta: None,
+            },
+        ],
+        delta: None,
+    };
+
+    let bs_health = Arc::new(SystemHealthCheck::simple_http(format!(
+        "http://{addr}/bs-health"
+    )));
+
+    // 1) Second item fails health -> both cloud-link and brainstem roll back,
+    //    last-known-good links stay intact, and previous release dirs survive on disk even with keep_history=0!
+    updater
+        .schedule(&sign_manifest(&make_bundle_manifest(1), &key), "idem-bun-1")
+        .unwrap();
+    let j1 = updater
+        .execute_active_job(Some(bs_health.clone()), Duration::from_millis(20), |_| {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(j1.phase, JobPhase::RolledBack);
+    assert!(
+        bs_v1.is_dir(),
+        "prev brainstem release must NOT be GC'd on mid-bundle rollback"
+    );
+    assert!(
+        cl_v1.is_dir(),
+        "prev cloud-link release must NOT be GC'd on mid-bundle rollback"
+    );
+    assert_eq!(
+        read_link_target(&components_root.join("brainstem/current")).unwrap(),
+        bs_v1
+    );
+    assert_eq!(
+        read_link_target(&components_root.join("brainstem/last-known-good")).unwrap(),
+        bs_v1
+    );
+    assert_eq!(
+        read_link_target(&components_root.join("cloud-link/current")).unwrap(),
+        cl_v1
+    );
+    assert_eq!(
+        read_link_target(&components_root.join("cloud-link/last-known-good")).unwrap(),
+        cl_v1
+    );
+    assert_eq!(
+        updater.component_version("brainstem").as_deref(),
+        Some("1.0.0")
+    );
+
+    // 2) Fix cloud-link health -> bundle succeeds cleanly!
+    fail_cl.store(false, Ordering::SeqCst);
+    updater
+        .schedule(&sign_manifest(&make_bundle_manifest(2), &key), "idem-bun-2")
+        .unwrap();
+    let j2 = updater
+        .execute_active_job(Some(bs_health), Duration::from_millis(20), |_| {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(j2.phase, JobPhase::Succeeded);
+    assert_eq!(
+        updater.component_version("brainstem").as_deref(),
+        Some("1.2.0")
+    );
+    assert_eq!(
+        updater.component_version("cloud-link").as_deref(),
+        Some("0.2.0")
+    );
+    assert_eq!(
+        restarter.units().last().map(String::as_str),
+        Some("doso-cloud-link.service")
     );
 
     srv.abort();

@@ -284,36 +284,61 @@ pub fn extract_release_tar_gz(archive: &Path, release_dir: &Path) -> Result<()> 
             "release_missing_doso_brainstem_binary"
         );
         verify_sha256sums_if_present(&payload)?;
-
-        // Replace any stale directory at `release_dir` safely via backup swap.
-        let backup = if release_dir.exists() {
-            let old = release_dir.with_file_name(format!(
-                ".{}.old.{}",
-                release_dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("release"),
-                Uuid::new_v4()
-            ));
-            fs::rename(release_dir, &old)?;
-            Some(old)
-        } else {
-            None
-        };
-        let move_res = fs::rename(&payload, release_dir);
-        if let Err(error) = move_res {
-            if let Some(old) = backup {
-                let _ = fs::rename(&old, release_dir);
-            }
-            return Err(error.into());
-        }
-        if let Some(old) = backup {
-            let _ = fs::remove_dir_all(old);
-        }
-        Ok(())
+        swap_extracted_dir(&payload, release_dir)
     })();
     let _ = fs::remove_dir_all(&temp_dir);
     result
+}
+
+/// Safely unpacks a multi-component `component_release` `.tar.gz` into `release_dir` atomically.
+/// For `component == "brainstem"`, enforces the `bin/doso-brainstem` presence check; for other
+/// components (`cloud-link`, `ota`, `voice`, `nav`, ...), verifies optional `SHA256SUMS` and
+/// ensures the extracted tree is non-empty.
+pub fn extract_component_tar_gz(archive: &Path, release_dir: &Path, component: &str) -> Result<()> {
+    if component == "brainstem" {
+        return extract_release_tar_gz(archive, release_dir);
+    }
+    let temp_dir = extract_to_temp(archive, release_dir)?;
+    let result = (|| -> Result<()> {
+        let payload = resolve_payload_root(&temp_dir, |dir| {
+            dir.join("bin").is_dir() || dir.join("SHA256SUMS").is_file()
+        });
+        let has_entries = fs::read_dir(&payload)?.next().is_some();
+        ensure!(has_entries, "component_release_empty");
+        verify_sha256sums_if_present(&payload)?;
+        swap_extracted_dir(&payload, release_dir)
+    })();
+    let _ = fs::remove_dir_all(&temp_dir);
+    result
+}
+
+fn swap_extracted_dir(payload: &Path, release_dir: &Path) -> Result<()> {
+    // Replace any stale directory at `release_dir` safely via backup swap.
+    let backup = if release_dir.exists() {
+        let old = release_dir.with_file_name(format!(
+            ".{}.old.{}",
+            release_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("release"),
+            Uuid::new_v4()
+        ));
+        fs::rename(release_dir, &old)?;
+        Some(old)
+    } else {
+        None
+    };
+    let move_res = fs::rename(payload, release_dir);
+    if let Err(error) = move_res {
+        if let Some(old) = backup {
+            let _ = fs::rename(&old, release_dir);
+        }
+        return Err(error.into());
+    }
+    if let Some(old) = backup {
+        let _ = fs::remove_dir_all(old);
+    }
+    Ok(())
 }
 
 /// Safely unpacks a Channel B `policy_package` `.tar.gz` into `dest_dir`,

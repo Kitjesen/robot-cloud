@@ -204,7 +204,9 @@ pub struct CloudClient {
 
 impl CloudClient {
     pub fn new(base_url: String, token: Option<String>) -> Result<Self> {
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(15));
         if url::Url::parse(&base_url)
             .ok()
             .and_then(|u| {
@@ -300,8 +302,18 @@ fn job_to_report(job: &Job, current_version: &str) -> CloudJobReport {
     }
 }
 
-/// Runs startup recovery for any persisted incomplete job, reporting the outcome if a cloud
-/// client is configured.
+fn report_version_for_job(updater: &Updater, job: &Job) -> String {
+    if job.manifest.artifact_type == crate::ArtifactType::ComponentRelease
+        && let Some(comp) = job.manifest.component.as_deref()
+        && let Some(ver) = updater.component_version(comp)
+    {
+        return ver;
+    }
+    updater.profile().current_version
+}
+
+/// Runs startup recovery for any persisted incomplete job (including reconciling any pending
+/// `doso-ota` self-upgrade), reporting the outcome if a cloud client is configured.
 pub async fn recover_on_startup<C: HealthCheck + ?Sized + 'static>(
     updater: &Arc<Mutex<Updater>>,
     checker: Option<Arc<C>>,
@@ -313,39 +325,81 @@ pub async fn recover_on_startup<C: HealthCheck + ?Sized + 'static>(
     let result = {
         let guard = updater.lock().await;
         device_id = guard.profile().device_id;
-        let has_incomplete = guard.job()?.is_some_and(|j| !j.phase.is_terminal());
-        if !has_incomplete {
-            return Ok(None);
+        if let Some(reconciled) = guard.reconcile_self_upgrade(true)? {
+            let ver = report_version_for_job(&guard, &reconciled);
+            progress_log.push((reconciled.job_id.clone(), job_to_report(&reconciled, &ver)));
+            Some(reconciled)
+        } else {
+            let has_incomplete = guard.job()?.is_some_and(|j| !j.phase.is_terminal());
+            if !has_incomplete {
+                return Ok(None);
+            }
+            guard
+                .execute_active_job(checker, health_poll_interval, |job| {
+                    let ver = report_version_for_job(&guard, job);
+                    progress_log.push((job.job_id.clone(), job_to_report(job, &ver)));
+                })
+                .await?
         }
-        guard
-            .execute_active_job(checker, health_poll_interval, |job| {
-                let ver = guard.profile().current_version;
-                progress_log.push((job.job_id.clone(), job_to_report(job, &ver)));
-            })
-            .await?
     };
     if let Some(cloud) = cloud {
         for (job_id, report) in progress_log {
-            let _ = cloud.report_job(&device_id, &job_id, &report).await;
+            if let Err(error) = cloud.report_job(&device_id, &job_id, &report).await {
+                eprintln!("ota_cloud_report_error: {error}");
+            }
         }
     }
     Ok(result)
 }
 
-/// Performs one cloud poll cycle: checks `next-job`, schedules & executes the job end-to-end,
-/// and reports every phase transition back to `cloud/release`.
+/// Performs one cloud poll cycle: retries any local job parked in `WaitingSafeWindow`, or checks
+/// `next-job`, schedules & executes the job end-to-end, and reports every phase transition back
+/// to `cloud/release`.
 pub async fn poll_and_execute_once<C: HealthCheck + ?Sized + 'static>(
     updater: &Arc<Mutex<Updater>>,
     checker: Option<Arc<C>>,
     cloud: &CloudClient,
     health_poll_interval: Duration,
 ) -> Result<Option<Job>> {
+    // If a local job is waiting for a safe robot window, retry it before fetching new work.
+    {
+        let mut waiting_reports: Vec<(String, CloudJobReport)> = Vec::new();
+        let (device_id, exec_res) = {
+            let guard = updater.lock().await;
+            let device_id = guard.profile().device_id;
+            let is_waiting = guard
+                .job()?
+                .is_some_and(|j| j.phase == crate::JobPhase::WaitingSafeWindow);
+            if is_waiting {
+                let res = guard
+                    .execute_active_job(checker.clone(), health_poll_interval, |job| {
+                        let ver = report_version_for_job(&guard, job);
+                        waiting_reports.push((job.job_id.clone(), job_to_report(job, &ver)));
+                    })
+                    .await;
+                (device_id, Some(res))
+            } else {
+                (device_id, None)
+            }
+        };
+        for (job_id, report) in &waiting_reports {
+            if let Err(error) = cloud.report_job(&device_id, job_id, report).await {
+                eprintln!("ota_cloud_report_error: {error}");
+            }
+        }
+        if let Some(res) = exec_res
+            && let Some(job) = res?
+        {
+            return Ok(Some(job));
+        }
+    }
+
     let device_id = { updater.lock().await.profile().device_id };
     let Some(next) = cloud.fetch_next_job(&device_id).await? else {
         return Ok(None);
     };
     let mut progress_log: Vec<CloudJobReport> = Vec::new();
-    let executed = {
+    let exec_res = {
         let guard = updater.lock().await;
         match guard.schedule_with_id(
             &next.manifest,
@@ -362,21 +416,35 @@ pub async fn poll_and_execute_once<C: HealthCheck + ?Sized + 'static>(
                     message: Some(error.to_string()),
                 };
                 drop(guard);
-                let _ = cloud.report_job(&device_id, &next.job_id, &report).await;
+                if let Err(rep_err) = cloud.report_job(&device_id, &next.job_id, &report).await {
+                    eprintln!("ota_cloud_report_error: {rep_err}");
+                }
                 return Err(error);
             }
         }
-        guard
+        let res = guard
             .execute_active_job(checker, health_poll_interval, |job| {
-                let ver = guard.profile().current_version;
+                let ver = report_version_for_job(&guard, job);
                 progress_log.push(job_to_report(job, &ver));
             })
-            .await?
+            .await;
+        // If a terminal job already existed locally (previous report_job lost to network drop),
+        // re-report its terminal phase so cloud/release stops returning it on next-job.
+        if let Ok(Some(ref job)) = res
+            && progress_log.is_empty()
+            && job.phase.is_terminal()
+        {
+            let ver = report_version_for_job(&guard, job);
+            progress_log.push(job_to_report(job, &ver));
+        }
+        res
     };
     for report in &progress_log {
-        let _ = cloud.report_job(&device_id, &next.job_id, report).await;
+        if let Err(error) = cloud.report_job(&device_id, &next.job_id, report).await {
+            eprintln!("ota_cloud_report_error: {error}");
+        }
     }
-    Ok(executed)
+    exec_res
 }
 
 /// Background autonomous cloud polling loop (interruptible by `shutdown_rx`).
@@ -442,7 +510,24 @@ pub async fn run_cloud_loop<C: HealthCheck + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, routing::get};
+    use crate::{
+        ArtifactType, JobPhase, Manifest, ManifestEnvelope, RollbackPolicy, ServiceRestarter, Slot,
+        SystemHealthCheck, UpdaterConfig,
+    };
+    use axum::{
+        Json, Router,
+        extract::State,
+        routing::{get, post},
+    };
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer, SigningKey, pkcs8::EncodePublicKey};
+
+    struct NoopRestarter;
+    impl ServiceRestarter for NoopRestarter {
+        fn restart(&self, _unit: &str) -> Result<()> {
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn collects_local_brainstem_health_and_policies_json() {
@@ -497,6 +582,165 @@ mod tests {
             report.rt_loop.as_ref().map(|r| r.max_mutex_wait_us),
             Some(0)
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn poll_re_reports_already_terminal_job_if_cloud_report_was_previously_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[41; 32]);
+        let key_path = dir.path().join("pub.pem");
+        std::fs::write(
+            &key_path,
+            key.verifying_key()
+                .to_public_key_pem(Default::default())
+                .unwrap(),
+        )
+        .unwrap();
+
+        let cfg = UpdaterConfig {
+            root: dir.path().join("state"),
+            device_id: "dev-rereport".into(),
+            model: "THUNDER 01".into(),
+            hardware_revision: "rdk-s100p".into(),
+            bootloader_version: "1.0.0".into(),
+            brainstem_version: "0.0.3".into(),
+            current_version: "0.0.3".into(),
+            battery_percent: 95,
+            online: true,
+            task_running: false,
+            boot_id_path: dir.path().join("boot_id"),
+            verify_key_path: key_path,
+            brainstem_unit: "doso-brainstem.service".into(),
+            staging_dir: None,
+            releases_dir: None,
+            current_link: None,
+            last_good_link: None,
+            components_root: Some(dir.path().join("components")),
+            keep_history: 2,
+            require_can_read_only: false,
+            min_vbus_v: 44.0,
+            ota_unit: "doso-ota.service".into(),
+            policy_admin_url: None,
+            policy_admin_token: None,
+            allow_insecure_http_loopback: true,
+        };
+        let updater = Updater::with_restarter(cfg, Arc::new(NoopRestarter)).unwrap();
+        let manifest = Manifest {
+            manifest_version: 1,
+            release_id: "rel-rereport".into(),
+            channel: "qa".into(),
+            sequence: 5,
+            version: "0.0.4".into(),
+            issued_at_ms: 1,
+            expires_at_ms: i64::MAX,
+            model: "THUNDER 01".into(),
+            hardware_revision: "rdk-s100p".into(),
+            minimum_bootloader_version: "1.0.0".into(),
+            minimum_brainstem_version: "0.0.1".into(),
+            minimum_battery_percent: 20,
+            artifact_url: "https://example.test/bs.tar.gz".into(),
+            artifact_size_bytes: 3,
+            artifact_sha256: Manifest::artifact_hash(b"abc"),
+            key_id: "k1".into(),
+            rollback_policy: RollbackPolicy {
+                mode: "automatic".into(),
+                health_timeout_ms: 1000,
+            },
+            artifact_type: ArtifactType::BrainstemRelease,
+            policy_slot: None,
+            shadow_frames: None,
+            activate: None,
+            component: None,
+            systemd_unit: None,
+            health_url: None,
+            requires: BTreeMap::new(),
+            bundle_items: Vec::new(),
+            delta: None,
+        };
+        let payload = serde_json::to_vec(&manifest).unwrap();
+        let env = ManifestEnvelope {
+            payload: URL_SAFE_NO_PAD.encode(&payload),
+            signature: URL_SAFE_NO_PAD.encode(key.sign(&payload).to_bytes()),
+        };
+
+        // Persist a locally completed terminal job for idem-dup (simulating prior missed cloud report).
+        let done_job = Job {
+            job_id: "job-dup-1".into(),
+            idempotency_key: "idem-dup".into(),
+            device_id: "dev-rereport".into(),
+            release_id: "rel-rereport".into(),
+            version: "0.0.4".into(),
+            manifest: manifest.clone(),
+            phase: JobPhase::Succeeded,
+            downloaded_bytes: 3,
+            total_bytes: 3,
+            active_slot: Slot::A,
+            last_known_good_slot: Slot::A,
+            last_known_good_version: "0.0.3".into(),
+            progress_sequence: 4,
+            boot_id_before: None,
+            boot_id_after: None,
+            error: None,
+            previous_release_path: None,
+            installed_release_path: None,
+        };
+        std::fs::write(
+            dir.path().join("state/job.json"),
+            serde_json::to_vec_pretty(&done_job).unwrap(),
+        )
+        .unwrap();
+
+        let reports: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reports_srv = reports.clone();
+        let env_srv = env.clone();
+        let app = Router::new()
+            .route(
+                "/v1/agent/devices/{id}/next-job",
+                get(move || {
+                    let e = env_srv.clone();
+                    async move {
+                        Json(serde_json::json!({
+                            "jobId": "job-dup-1",
+                            "idempotencyKey": "idem-dup",
+                            "manifest": e
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/agent/devices/{id}/jobs/{job_id}/report",
+                post(
+                    move |State(rep): State<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
+                          Json(body): Json<serde_json::Value>| async move {
+                        rep.lock().unwrap().push(body);
+                        Json(serde_json::json!({"ok": true}))
+                    },
+                ),
+            )
+            .with_state(reports_srv);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = CloudClient::new(format!("http://{addr}"), None).unwrap();
+        let updater = Arc::new(Mutex::new(updater));
+        let res = poll_and_execute_once::<SystemHealthCheck>(
+            &updater,
+            None,
+            &client,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(res.phase, JobPhase::Succeeded);
+        let posted = reports.lock().unwrap();
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0]["phase"], "succeeded");
         server.abort();
     }
 }

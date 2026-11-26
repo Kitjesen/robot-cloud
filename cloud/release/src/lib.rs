@@ -1,8 +1,17 @@
+pub mod rollout;
+
+pub use rollout::{
+    CircuitBreakerConfig, CircuitBreakerState, CreateRolloutRequest, RolloutCampaign,
+    RolloutDeviceState, RolloutStage, RolloutStageCounts, RolloutStatus, RolloutView,
+    device_bucket,
+};
+
 use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -10,8 +19,13 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use doso_ota::{ArtifactType, Manifest, ManifestEnvelope};
 use ed25519_dalek::{Signer, SigningKey, pkcs8::DecodePrivateKey};
 use hmac::{Hmac, Mac};
+use rollout::{
+    build_rollout_view, eligible_stage_for_device, evaluate_circuit_breaker, load_rollouts,
+    maybe_auto_promote, persist_rollout, validate_rollout_id, validate_rollout_request,
+};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -20,11 +34,17 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use url::form_urlencoded;
 use uuid::Uuid;
 
 type HmacSha1 = Hmac<Sha1>;
+const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+
+fn default_ring() -> String {
+    "prod".into()
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -46,13 +66,22 @@ pub struct DeviceRecord {
     pub model: String,
     pub hardware_revision: String,
     pub enabled: bool,
+    #[serde(default = "default_ring")]
+    pub ring: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReleaseTemplate {
     pub manifest: Manifest,
+    #[serde(default)]
     pub object_key: String,
+    #[serde(default)]
+    pub bundle_object_keys: BTreeMap<String, String>,
+    #[serde(default)]
+    pub delta_object_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +99,8 @@ pub struct ReleaseSummary {
     pub artifact_type: ArtifactType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_slot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,6 +140,8 @@ pub struct Job {
     pub current_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,23 +291,42 @@ pub struct DeviceStatusRecord {
 #[derive(Clone)]
 struct AppState {
     config: Config,
+    expected_token_hash: [u8; 32],
     signing_key: Arc<SigningKey>,
     jobs: Arc<Mutex<HashMap<String, Job>>>,
+    rollouts: Arc<Mutex<HashMap<String, RolloutCampaign>>>,
 }
 
 pub fn build_router(config: Config) -> Result<Router> {
+    ensure!(
+        !config.verify_api_token.trim().is_empty(),
+        "api_token_empty"
+    );
+    ensure!(
+        !config.signing_key_id.trim().is_empty(),
+        "signing_key_id_empty"
+    );
+    ensure!(!config.oss_bucket.trim().is_empty(), "oss_bucket_empty");
+    ensure!(!config.oss_endpoint.trim().is_empty(), "oss_endpoint_empty");
+    ensure!(
+        config.signed_url_ttl_seconds >= 60,
+        "signed_url_ttl_too_small"
+    );
     // Validate registry and signing key up front so broken config fails fast at boot.
     let _ = load_registry(&config.device_registry)?;
     let signing_key = SigningKey::from_pkcs8_pem(&fs::read_to_string(&config.signing_key_path)?)?;
     let jobs = load_jobs(&config.root)?;
+    let rollouts = load_rollouts(&config.root)?;
+    let expected_token_hash =
+        Sha256::digest(format!("Bearer {}", config.verify_api_token).as_bytes()).into();
     let state = AppState {
         config,
+        expected_token_hash,
         signing_key: Arc::new(signing_key),
         jobs: Arc::new(Mutex::new(jobs)),
+        rollouts: Arc::new(Mutex::new(rollouts)),
     };
-    Ok(Router::new()
-        .route("/health", get(health))
-        .route("/v1/apps/android/latest", get(android_app_latest))
+    let protected = Router::new()
         .route(
             "/v1/apps/android/releases",
             post(publish_android_app_release),
@@ -296,6 +348,14 @@ pub fn build_router(config: Config) -> Result<Router> {
             post(cancel_job),
         )
         .route(
+            "/v1/devices/{device_id}/firmware/next-job",
+            get(agent_next_job),
+        )
+        .route(
+            "/v1/devices/{device_id}/firmware/jobs/{job_id}/report",
+            post(agent_report_job),
+        )
+        .route(
             "/v1/agent/devices/{device_id}/next-job",
             get(agent_next_job),
         )
@@ -303,12 +363,62 @@ pub fn build_router(config: Config) -> Result<Router> {
             "/v1/agent/devices/{device_id}/jobs/{job_id}/report",
             post(agent_report_job),
         )
+        .route("/v1/rollouts", post(create_rollout).get(list_rollouts))
+        .route("/v1/rollouts/{rollout_id}", get(get_rollout))
+        .route("/v1/rollouts/{rollout_id}/promote", post(promote_rollout))
+        .route("/v1/rollouts/{rollout_id}/pause", post(pause_rollout))
+        .route("/v1/rollouts/{rollout_id}/resume", post(resume_rollout))
+        .route("/v1/rollouts/{rollout_id}/abort", post(abort_rollout))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer_auth,
+        ));
+    Ok(Router::new()
+        .route("/health", get(health))
+        .route("/v1/apps/android/latest", get(android_app_latest))
+        .merge(protected)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .layer(middleware::from_fn(security_headers))
         .with_state(state))
 }
 
+async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 pub async fn run(config: Config, bind: SocketAddr) -> Result<()> {
+    let root = config.root.clone();
     let app = build_router(config)?;
-    axum::serve(tokio::net::TcpListener::bind(bind).await?, app).await?;
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    eprintln!(
+        "doso_ota_release_listening bind={bind} root={}",
+        root.display()
+    );
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
 }
 
@@ -357,24 +467,7 @@ fn load_android_app_release(
 }
 
 fn persist_android_app_release(root: &FsPath, release: &AndroidAppReleaseTemplate) -> Result<()> {
-    let path = android_app_release_path(root, &release.channel);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temp = path.with_extension(format!("json.{}.tmp", Uuid::new_v4()));
-    fs::write(&temp, serde_json::to_vec_pretty(release)?)?;
-    let file = fs::OpenOptions::new().read(true).write(true).open(&temp)?;
-    file.sync_all()?;
-    drop(file);
-    if let Err(error) = fs::rename(&temp, &path) {
-        if error.kind() != std::io::ErrorKind::PermissionDenied || !path.exists() {
-            let _ = fs::remove_file(&temp);
-            return Err(error.into());
-        }
-        fs::remove_file(&path)?;
-        fs::rename(&temp, &path)?;
-    }
-    Ok(())
+    atomic_write_json(&android_app_release_path(root, &release.channel), release)
 }
 
 async fn android_app_latest(
@@ -419,12 +512,8 @@ async fn android_app_latest(
 
 async fn publish_android_app_release(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(req): Json<AndroidAppPublishRequest>,
 ) -> Response {
-    if let Err(response) = authorize(&headers, &state.config) {
-        return *response;
-    }
     let channel = match validate_channel(&req.channel) {
         Ok(c) => c.to_string(),
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
@@ -461,6 +550,7 @@ fn validate_device_id(device_id: &str) -> Result<&str> {
     ensure!(
         !id.is_empty()
             && id.len() <= 128
+            && !id.starts_with('.')
             && !id.contains("..")
             && id
                 .chars()
@@ -475,23 +565,7 @@ fn device_status_path(root: &FsPath, device_id: &str) -> PathBuf {
 }
 
 fn persist_device_status(root: &FsPath, record: &DeviceStatusRecord) -> Result<()> {
-    let directory = root.join("status");
-    fs::create_dir_all(&directory)?;
-    let path = device_status_path(root, &record.device_id);
-    let temp = directory.join(format!("{}.{}.tmp", record.device_id, Uuid::new_v4()));
-    fs::write(&temp, serde_json::to_vec_pretty(record)?)?;
-    let file = fs::OpenOptions::new().read(true).write(true).open(&temp)?;
-    file.sync_all()?;
-    drop(file);
-    if let Err(error) = fs::rename(&temp, &path) {
-        if error.kind() != std::io::ErrorKind::PermissionDenied || !path.exists() {
-            let _ = fs::remove_file(&temp);
-            return Err(error.into());
-        }
-        fs::remove_file(&path)?;
-        fs::rename(&temp, &path)?;
-    }
-    Ok(())
+    atomic_write_json(&device_status_path(root, &record.device_id), record)
 }
 
 fn load_device_status(root: &FsPath, device_id: &str) -> Result<Option<DeviceStatusRecord>> {
@@ -506,13 +580,9 @@ fn load_device_status(root: &FsPath, device_id: &str) -> Result<Option<DeviceSta
 
 async fn agent_report_device_status(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(device_id): Path<String>,
     Json(report): Json<DeviceStatusReportRequest>,
 ) -> Response {
-    if let Err(response) = authorize(&headers, &state.config) {
-        return *response;
-    }
     let clean_id = match validate_device_id(&device_id) {
         Ok(id) => id.to_string(),
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
@@ -545,12 +615,8 @@ async fn agent_report_device_status(
 
 async fn read_device_status(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(device_id): Path<String>,
 ) -> Response {
-    if let Err(response) = authorize(&headers, &state.config) {
-        return *response;
-    }
     let clean_id = match validate_device_id(&device_id) {
         Ok(id) => id.to_string(),
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
@@ -562,10 +628,7 @@ async fn read_device_status(
     }
 }
 
-async fn list_device_statuses(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = authorize(&headers, &state.config) {
-        return *response;
-    }
+async fn list_device_statuses(State(state): State<AppState>) -> Response {
     let directory = state.config.root.join("status");
     let mut items = Vec::new();
     if directory.exists() {
@@ -593,15 +656,12 @@ async fn list_device_statuses(State(state): State<AppState>, headers: HeaderMap)
     (StatusCode::OK, Json(items)).into_response()
 }
 
-async fn releases(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(device_id): Path<String>,
-) -> Response {
-    if let Err(response) = authorize(&headers, &state.config) {
-        return *response;
-    }
-    let device = match lookup_enabled_device(&state.config.device_registry, &device_id) {
+async fn releases(State(state): State<AppState>, Path(device_id): Path<String>) -> Response {
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let device = match lookup_enabled_device(&state.config.device_registry, &clean_id) {
         Ok(Some(device)) => device,
         Ok(None) => return error_response(StatusCode::NOT_FOUND, "device_not_found"),
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
@@ -614,14 +674,14 @@ async fn releases(
 
 async fn start_job(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(device_id): Path<String>,
     Json(request): Json<StartRequest>,
 ) -> Response {
-    if let Err(response) = authorize(&headers, &state.config) {
-        return *response;
-    }
-    let device = match lookup_enabled_device(&state.config.device_registry, &device_id) {
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let device = match lookup_enabled_device(&state.config.device_registry, &clean_id) {
         Ok(Some(device)) => device,
         Ok(None) => return error_response(StatusCode::NOT_FOUND, "device_not_found"),
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
@@ -629,20 +689,25 @@ async fn start_job(
     if let Err(error) = ensure_request(&request) {
         return error_response(StatusCode::BAD_REQUEST, &error.to_string());
     }
+    let release_id = request.release_id.trim().to_string();
+    let idempotency_key = request.idempotency_key.trim().to_string();
     let mut jobs = state.jobs.lock().await;
     if let Some(job) = jobs
         .values()
-        .find(|job| job.device_id == device_id && job.idempotency_key == request.idempotency_key)
+        .find(|job| job.device_id == clean_id && job.idempotency_key == idempotency_key)
     {
+        if job.release_id != release_id {
+            return error_response(StatusCode::CONFLICT, "idempotency_key_conflict");
+        }
         return (StatusCode::ACCEPTED, Json(job)).into_response();
     }
     if jobs
         .values()
-        .any(|job| job.device_id == device_id && is_active_phase(&job.phase))
+        .any(|job| job.device_id == clean_id && is_active_phase(&job.phase))
     {
         return error_response(StatusCode::CONFLICT, "job_already_active");
     }
-    let template = match load_release_template(&state.config.root, &request.release_id) {
+    let template = match load_release_template(&state.config.root, &release_id) {
         Ok(template) => template,
         Err(error) => return error_response(StatusCode::NOT_FOUND, &error.to_string()),
     };
@@ -658,9 +723,9 @@ async fn start_job(
     };
     let job = Job {
         job_id: Uuid::new_v4().to_string(),
-        device_id,
-        release_id: request.release_id,
-        idempotency_key: request.idempotency_key,
+        device_id: clean_id,
+        release_id,
+        idempotency_key,
         phase: "scheduled".into(),
         manifest: envelope,
         created_at_ms: now,
@@ -668,6 +733,7 @@ async fn start_job(
         bytes_downloaded: 0,
         current_version: None,
         message: None,
+        rollout_id: None,
     };
     if let Err(error) = persist_job(&state.config.root, &job) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
@@ -678,14 +744,14 @@ async fn start_job(
 
 async fn read_job(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path((device_id, job_id)): Path<(String, String)>,
 ) -> Response {
-    if let Err(response) = authorize(&headers, &state.config) {
-        return *response;
-    }
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
     let jobs = state.jobs.lock().await;
-    match jobs.get(&job_id).filter(|job| job.device_id == device_id) {
+    match jobs.get(&job_id).filter(|job| job.device_id == clean_id) {
         Some(job) => (StatusCode::OK, Json(job)).into_response(),
         None => error_response(StatusCode::NOT_FOUND, "job_not_found"),
     }
@@ -693,56 +759,83 @@ async fn read_job(
 
 async fn cancel_job(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path((device_id, job_id)): Path<(String, String)>,
 ) -> Response {
-    if let Err(response) = authorize(&headers, &state.config) {
-        return *response;
-    }
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
     let mut jobs = state.jobs.lock().await;
     let Some(job) = jobs
         .get_mut(&job_id)
-        .filter(|job| job.device_id == device_id)
+        .filter(|job| job.device_id == clean_id)
     else {
         return error_response(StatusCode::NOT_FOUND, "job_not_found");
     };
-    if matches!(job.phase.as_str(), "scheduled" | "downloading") {
-        job.phase = "cancelled".into();
-        job.updated_at_ms = now_ms();
+    if job.phase == "cancelled" {
+        return (StatusCode::OK, Json(job)).into_response();
     }
+    if !matches!(
+        job.phase.as_str(),
+        "scheduled" | "downloading" | "waiting_safe_window"
+    ) {
+        return error_response(StatusCode::CONFLICT, "job_not_cancellable");
+    }
+    let now = now_ms();
+    job.phase = "cancelled".into();
+    job.updated_at_ms = now;
     if let Err(error) = persist_job(&state.config.root, job) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
     }
-    (StatusCode::OK, Json(job)).into_response()
+    let cancelled_job = job.clone();
+    if let Some(ref rid) = cancelled_job.rollout_id {
+        let mut rollouts = state.rollouts.lock().await;
+        if let Some(rollout) = rollouts.get_mut(rid) {
+            if let Some(dev_state) = rollout.device_states.get_mut(&clean_id)
+                && dev_state.job_id == cancelled_job.job_id
+            {
+                dev_state.phase = "cancelled".into();
+                dev_state.updated_at_ms = now;
+            }
+            rollout.updated_at_ms = now;
+            if let Err(error) = persist_rollout(&state.config.root, rollout) {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        }
+    }
+    (StatusCode::OK, Json(cancelled_job)).into_response()
 }
 
-async fn agent_next_job(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(device_id): Path<String>,
-) -> Response {
-    if let Err(response) = authorize(&headers, &state.config) {
-        return *response;
-    }
-    match lookup_enabled_device(&state.config.device_registry, &device_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "device_not_found"),
+async fn agent_next_job(State(state): State<AppState>, Path(device_id): Path<String>) -> Response {
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let registry = match load_registry(&state.config.device_registry) {
+        Ok(reg) => reg,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
-    }
+    };
+    let Some(device) = registry.get(&clean_id).filter(|d| d.enabled).cloned() else {
+        return error_response(StatusCode::NOT_FOUND, "device_not_found");
+    };
+
     let mut jobs = state.jobs.lock().await;
-    let Some(next_id) = jobs
+    if let Some(next_id) = jobs
         .values()
         .filter(|job| {
-            job.device_id == device_id && matches!(job.phase.as_str(), "scheduled" | "downloading")
+            job.device_id == clean_id && matches!(job.phase.as_str(), "scheduled" | "downloading")
         })
         .min_by_key(|job| job.created_at_ms)
         .map(|job| job.job_id.clone())
-    else {
-        return StatusCode::NO_CONTENT.into_response();
-    };
-    let job = jobs.get_mut(&next_id).expect("selected job exists");
-    let now = now_ms();
-    if let Ok(template) = load_release_template(&state.config.root, &job.release_id) {
+    {
+        let job = jobs.get_mut(&next_id).expect("selected job exists");
+        let now = now_ms();
+        let template = match load_release_template(&state.config.root, &job.release_id) {
+            Ok(template) => template,
+            Err(error) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        };
         match build_signed_envelope(&state.config, &state.signing_key, template, now) {
             Ok(envelope) => {
                 job.manifest = envelope;
@@ -755,23 +848,117 @@ async fn agent_next_job(
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
             }
         }
+        return (StatusCode::OK, Json(job.clone())).into_response();
     }
-    (StatusCode::OK, Json(job.clone())).into_response()
+
+    // Do not auto-assign a rollout job if the device already has another active job in flight.
+    if jobs
+        .values()
+        .any(|job| job.device_id == clean_id && is_active_phase(&job.phase))
+    {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    // Evaluate active canary rollouts in deterministic creation order.
+    let now = now_ms();
+    let mut rollouts = state.rollouts.lock().await;
+    let mut rollout_ids: Vec<(i64, String)> = rollouts
+        .values()
+        .map(|r| (r.created_at_ms, r.rollout_id.clone()))
+        .collect();
+    rollout_ids.sort();
+
+    for (_, rid) in rollout_ids {
+        let Some(rollout) = rollouts.get_mut(&rid) else {
+            continue;
+        };
+        if maybe_auto_promote(rollout, &registry, now)
+            && let Err(error) = persist_rollout(&state.config.root, rollout)
+        {
+            eprintln!("persist_rollout_auto_promote_failed rollout_id={rid} err={error}");
+        }
+        let Some(stage_idx) = eligible_stage_for_device(rollout, &clean_id, &device) else {
+            continue;
+        };
+        let template = match load_release_template(&state.config.root, &rollout.release_id) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if template.manifest.model != device.model
+            || template.manifest.hardware_revision != device.hardware_revision
+        {
+            continue;
+        }
+        let envelope = match build_signed_envelope(&state.config, &state.signing_key, template, now)
+        {
+            Ok(env) => env,
+            Err(error) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        };
+        let job = Job {
+            job_id: Uuid::new_v4().to_string(),
+            device_id: clean_id.clone(),
+            release_id: rollout.release_id.clone(),
+            idempotency_key: format!("rollout:{rid}:{clean_id}:{stage_idx}"),
+            phase: "scheduled".into(),
+            manifest: envelope,
+            created_at_ms: now,
+            updated_at_ms: now,
+            bytes_downloaded: 0,
+            current_version: None,
+            message: None,
+            rollout_id: Some(rid.clone()),
+        };
+        if let Err(error) = persist_job(&state.config.root, &job) {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        rollout.device_states.insert(
+            clean_id.clone(),
+            RolloutDeviceState {
+                device_id: clean_id.clone(),
+                stage_index: stage_idx,
+                job_id: job.job_id.clone(),
+                phase: job.phase.clone(),
+                assigned_at_ms: now,
+                updated_at_ms: now,
+                message: None,
+            },
+        );
+        rollout.updated_at_ms = now;
+        if let Err(error) = persist_rollout(&state.config.root, rollout) {
+            rollout.device_states.remove(&clean_id);
+            let _ = fs::remove_file(
+                state
+                    .config
+                    .root
+                    .join("jobs")
+                    .join(format!("{}.json", job.job_id)),
+            );
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+        jobs.insert(job.job_id.clone(), job.clone());
+        return (StatusCode::OK, Json(job)).into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn agent_report_job(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path((device_id, job_id)): Path<(String, String)>,
     Json(report): Json<AgentReportRequest>,
 ) -> Response {
-    if let Err(response) = authorize(&headers, &state.config) {
-        return *response;
-    }
-    match lookup_enabled_device(&state.config.device_registry, &device_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "device_not_found"),
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let registry = match load_registry(&state.config.device_registry) {
+        Ok(reg) => reg,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    if !registry.get(&clean_id).is_some_and(|d| d.enabled) {
+        return error_response(StatusCode::NOT_FOUND, "device_not_found");
     }
     if !is_valid_agent_phase(&report.phase) {
         return error_response(StatusCode::BAD_REQUEST, "invalid_phase");
@@ -779,13 +966,14 @@ async fn agent_report_job(
     let mut jobs = state.jobs.lock().await;
     let Some(job) = jobs
         .get_mut(&job_id)
-        .filter(|job| job.device_id == device_id)
+        .filter(|job| job.device_id == clean_id)
     else {
         return error_response(StatusCode::NOT_FOUND, "job_not_found");
     };
     if is_terminal_phase(&job.phase) && job.phase != report.phase {
         return error_response(StatusCode::CONFLICT, "job_already_terminal");
     }
+    let now = now_ms();
     job.phase = report.phase;
     if let Some(bytes) = report.bytes_downloaded {
         job.bytes_downloaded = bytes;
@@ -796,11 +984,240 @@ async fn agent_report_job(
     if let Some(message) = report.message {
         job.message = Some(message);
     }
-    job.updated_at_ms = now_ms();
+    job.updated_at_ms = now;
     if let Err(error) = persist_job(&state.config.root, job) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
     }
-    (StatusCode::OK, Json(job.clone())).into_response()
+    let updated_job = job.clone();
+
+    if let Some(ref rid) = updated_job.rollout_id {
+        let mut rollouts = state.rollouts.lock().await;
+        if let Some(rollout) = rollouts.get_mut(rid) {
+            if let Some(dev_state) = rollout.device_states.get_mut(&clean_id) {
+                dev_state.phase = updated_job.phase.clone();
+                dev_state.updated_at_ms = now;
+                dev_state.message = updated_job.message.clone();
+            }
+            rollout.updated_at_ms = now;
+            if !evaluate_circuit_breaker(rollout, &clean_id, &updated_job.phase, now) {
+                maybe_auto_promote(rollout, &registry, now);
+            }
+            if let Err(error) = persist_rollout(&state.config.root, rollout) {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(updated_job)).into_response()
+}
+
+async fn create_rollout(
+    State(state): State<AppState>,
+    Json(req): Json<CreateRolloutRequest>,
+) -> Response {
+    if let Err(error) = validate_rollout_request(&req) {
+        return error_response(StatusCode::BAD_REQUEST, &error.to_string());
+    }
+    let release_id = req.release_id.trim().to_string();
+    let template = match load_release_template(&state.config.root, &release_id) {
+        Ok(t) => t,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, &error.to_string()),
+    };
+    if template.manifest.artifact_type == ArtifactType::ReleaseBundle {
+        if template.manifest.bundle_items.is_empty() {
+            return error_response(StatusCode::CONFLICT, "bundle_items_empty");
+        }
+    } else if template.object_key.trim().is_empty() {
+        return error_response(StatusCode::CONFLICT, "release_object_key_missing");
+    }
+    let target_model = req
+        .target_model
+        .clone()
+        .unwrap_or_else(|| template.manifest.model.clone());
+    if target_model != template.manifest.model {
+        return error_response(StatusCode::CONFLICT, "rollout_model_mismatch");
+    }
+    let target_hardware_revision = req
+        .target_hardware_revision
+        .clone()
+        .or_else(|| Some(template.manifest.hardware_revision.clone()));
+    if let Some(ref hw) = target_hardware_revision
+        && hw != &template.manifest.hardware_revision
+    {
+        return error_response(StatusCode::CONFLICT, "rollout_hardware_mismatch");
+    }
+
+    let rollout_id = match req.rollout_id {
+        Some(id) => id.trim().to_owned(),
+        None => format!("ro-{}", Uuid::new_v4()),
+    };
+    let now = now_ms();
+    let mut rollouts = state.rollouts.lock().await;
+    if rollouts.contains_key(&rollout_id) {
+        return error_response(StatusCode::CONFLICT, "rollout_already_exists");
+    }
+    let campaign = RolloutCampaign {
+        rollout_id: rollout_id.clone(),
+        release_id,
+        target_model,
+        target_hardware_revision,
+        target_tags: req.target_tags,
+        stages: req.stages,
+        circuit_breaker: req.circuit_breaker,
+        status: RolloutStatus::Active,
+        current_stage_index: 0,
+        created_at_ms: now,
+        updated_at_ms: now,
+        stage_started_at_ms: now,
+        circuit_open_reason: None,
+        device_states: BTreeMap::new(),
+    };
+    if let Err(error) = persist_rollout(&state.config.root, &campaign) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    let view = build_rollout_view(&campaign);
+    rollouts.insert(rollout_id, campaign);
+    (StatusCode::CREATED, Json(view)).into_response()
+}
+
+async fn list_rollouts(State(state): State<AppState>) -> Response {
+    let registry = match load_registry(&state.config.device_registry) {
+        Ok(reg) => reg,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    let now = now_ms();
+    let mut rollouts = state.rollouts.lock().await;
+    let mut views = Vec::with_capacity(rollouts.len());
+    for campaign in rollouts.values_mut() {
+        if maybe_auto_promote(campaign, &registry, now)
+            && let Err(error) = persist_rollout(&state.config.root, campaign)
+        {
+            eprintln!(
+                "persist_rollout_auto_promote_failed rollout_id={} err={error}",
+                campaign.rollout_id
+            );
+        }
+        views.push(build_rollout_view(campaign));
+    }
+    views.sort_by_key(|v| (v.campaign.created_at_ms, v.campaign.rollout_id.clone()));
+    (StatusCode::OK, Json(views)).into_response()
+}
+
+async fn get_rollout(State(state): State<AppState>, Path(rollout_id): Path<String>) -> Response {
+    let clean_id = match validate_rollout_id(&rollout_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let registry = match load_registry(&state.config.device_registry) {
+        Ok(reg) => reg,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    let now = now_ms();
+    let mut rollouts = state.rollouts.lock().await;
+    let Some(campaign) = rollouts.get_mut(&clean_id) else {
+        return error_response(StatusCode::NOT_FOUND, "rollout_not_found");
+    };
+    if maybe_auto_promote(campaign, &registry, now)
+        && let Err(error) = persist_rollout(&state.config.root, campaign)
+    {
+        eprintln!("persist_rollout_auto_promote_failed rollout_id={clean_id} err={error}");
+    }
+    (StatusCode::OK, Json(build_rollout_view(campaign))).into_response()
+}
+
+async fn promote_rollout(
+    State(state): State<AppState>,
+    Path(rollout_id): Path<String>,
+) -> Response {
+    let clean_id = match validate_rollout_id(&rollout_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let mut rollouts = state.rollouts.lock().await;
+    let Some(campaign) = rollouts.get_mut(&clean_id) else {
+        return error_response(StatusCode::NOT_FOUND, "rollout_not_found");
+    };
+    if campaign.status != RolloutStatus::Active {
+        return error_response(StatusCode::CONFLICT, "rollout_not_active");
+    }
+    let now = now_ms();
+    if campaign.current_stage_index + 1 < campaign.stages.len() {
+        campaign.current_stage_index += 1;
+        campaign.stage_started_at_ms = now;
+    } else {
+        campaign.status = RolloutStatus::Completed;
+    }
+    campaign.updated_at_ms = now;
+    if let Err(error) = persist_rollout(&state.config.root, campaign) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    (StatusCode::OK, Json(build_rollout_view(campaign))).into_response()
+}
+
+async fn pause_rollout(State(state): State<AppState>, Path(rollout_id): Path<String>) -> Response {
+    let clean_id = match validate_rollout_id(&rollout_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let mut rollouts = state.rollouts.lock().await;
+    let Some(campaign) = rollouts.get_mut(&clean_id) else {
+        return error_response(StatusCode::NOT_FOUND, "rollout_not_found");
+    };
+    if campaign.status != RolloutStatus::Active {
+        return error_response(StatusCode::CONFLICT, "rollout_not_active");
+    }
+    campaign.status = RolloutStatus::PausedManual;
+    campaign.updated_at_ms = now_ms();
+    if let Err(error) = persist_rollout(&state.config.root, campaign) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    (StatusCode::OK, Json(build_rollout_view(campaign))).into_response()
+}
+
+async fn resume_rollout(State(state): State<AppState>, Path(rollout_id): Path<String>) -> Response {
+    let clean_id = match validate_rollout_id(&rollout_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let mut rollouts = state.rollouts.lock().await;
+    let Some(campaign) = rollouts.get_mut(&clean_id) else {
+        return error_response(StatusCode::NOT_FOUND, "rollout_not_found");
+    };
+    if !matches!(
+        campaign.status,
+        RolloutStatus::PausedManual | RolloutStatus::PausedCircuitOpen
+    ) {
+        return error_response(StatusCode::CONFLICT, "rollout_not_paused");
+    }
+    let now = now_ms();
+    campaign.status = RolloutStatus::Active;
+    campaign.circuit_open_reason = None;
+    campaign.stage_started_at_ms = now;
+    campaign.updated_at_ms = now;
+    if let Err(error) = persist_rollout(&state.config.root, campaign) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    (StatusCode::OK, Json(build_rollout_view(campaign))).into_response()
+}
+
+async fn abort_rollout(State(state): State<AppState>, Path(rollout_id): Path<String>) -> Response {
+    let clean_id = match validate_rollout_id(&rollout_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let mut rollouts = state.rollouts.lock().await;
+    let Some(campaign) = rollouts.get_mut(&clean_id) else {
+        return error_response(StatusCode::NOT_FOUND, "rollout_not_found");
+    };
+    if campaign.status.is_terminal() {
+        return error_response(StatusCode::CONFLICT, "rollout_already_terminal");
+    }
+    campaign.status = RolloutStatus::Aborted;
+    campaign.updated_at_ms = now_ms();
+    if let Err(error) = persist_rollout(&state.config.root, campaign) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    (StatusCode::OK, Json(build_rollout_view(campaign))).into_response()
 }
 
 fn is_active_phase(phase: &str) -> bool {
@@ -809,6 +1226,7 @@ fn is_active_phase(phase: &str) -> bool {
         "scheduled"
             | "downloading"
             | "verifying"
+            | "waiting_safe_window"
             | "installing"
             | "rebooting"
             | "health_checking"
@@ -829,6 +1247,7 @@ fn is_valid_agent_phase(phase: &str) -> bool {
         phase,
         "downloading"
             | "verifying"
+            | "waiting_safe_window"
             | "installing"
             | "rebooting"
             | "health_checking"
@@ -854,17 +1273,26 @@ fn lookup_enabled_device(path: &FsPath, device_id: &str) -> Result<Option<Device
     Ok(registry.get(device_id).filter(|d| d.enabled).cloned())
 }
 
-fn load_release_template(root: &FsPath, release_id: &str) -> Result<ReleaseTemplate> {
+fn validate_release_id(release_id: &str) -> Result<&str> {
+    let id = release_id.trim();
     ensure!(
-        !release_id.is_empty()
-            && !release_id.contains('/')
-            && !release_id.contains('\\')
-            && !release_id.contains(".."),
+        !id.is_empty()
+            && id.len() <= 128
+            && !id.starts_with('.')
+            && !id.contains("..")
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
         "release_id_invalid"
     );
+    Ok(id)
+}
+
+fn load_release_template(root: &FsPath, release_id: &str) -> Result<ReleaseTemplate> {
+    let clean_id = validate_release_id(release_id)?;
     let template_path = root
         .join("releases")
-        .join(release_id)
+        .join(clean_id)
         .join("manifest.template.json");
     let bytes = fs::read(&template_path)?;
     Ok(serde_json::from_slice(&bytes)?)
@@ -886,15 +1314,46 @@ fn build_signed_envelope(
     } else {
         default_ttl_ms
     };
+    let now_secs = now_ms / 1000;
     template.manifest.issued_at_ms = now_ms;
     template.manifest.expires_at_ms = now_ms.saturating_add(ttl_ms);
     template.manifest.key_id = config.signing_key_id.clone();
-    template.manifest.artifact_url = oss_signed_url(config, &template.object_key, now_ms / 1000)?;
+
+    if !template.object_key.trim().is_empty() {
+        template.manifest.artifact_url = oss_signed_url(config, &template.object_key, now_secs)?;
+    } else if template.manifest.artifact_type != ArtifactType::ReleaseBundle {
+        anyhow::bail!("release_object_key_missing");
+    }
+
+    if let (Some(delta), Some(delta_key)) =
+        (&mut template.manifest.delta, &template.delta_object_key)
+        && !delta_key.trim().is_empty()
+    {
+        delta.patch_url = oss_signed_url(config, delta_key, now_secs)?;
+    }
+
+    for item in &mut template.manifest.bundle_items {
+        if let Some(key) = template.bundle_object_keys.get(&item.component)
+            && !key.trim().is_empty()
+        {
+            item.artifact_url = oss_signed_url(config, key, now_secs)?;
+        }
+        if let (Some(delta), Some(dkey)) = (
+            &mut item.delta,
+            template
+                .bundle_object_keys
+                .get(&format!("{}:delta", item.component)),
+        ) && !dkey.trim().is_empty()
+        {
+            delta.patch_url = oss_signed_url(config, dkey, now_secs)?;
+        }
+    }
+
     sign_manifest(&template.manifest, signing_key)
 }
 
 fn ensure_request(request: &StartRequest) -> Result<()> {
-    ensure!(!request.release_id.trim().is_empty(), "release_id_required");
+    validate_release_id(&request.release_id)?;
     ensure!(
         !request.idempotency_key.trim().is_empty() && request.idempotency_key.len() <= 128,
         "idempotency_key_invalid"
@@ -902,18 +1361,26 @@ fn ensure_request(request: &StartRequest) -> Result<()> {
     Ok(())
 }
 
-fn authorize(headers: &HeaderMap, config: &Config) -> Result<(), Box<Response>> {
-    let expected = format!("Bearer {}", config.verify_api_token);
-    let actual = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok());
-    if actual == Some(expected.as_str()) {
-        Ok(())
+async fn require_bearer_auth(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let actual = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .map(|value| value.as_bytes())
+        .unwrap_or_default();
+    let supplied: [u8; 32] = Sha256::digest(actual).into();
+    if bool::from(state.expected_token_hash.ct_eq(&supplied)) {
+        next.run(req).await
     } else {
-        Err(Box::new(error_response(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-        )))
+        let mut response = error_response(StatusCode::UNAUTHORIZED, "unauthorized");
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            header::HeaderValue::from_static("Bearer"),
+        );
+        response
     }
 }
 
@@ -924,7 +1391,11 @@ fn load_releases(root: &FsPath, device: &DeviceRecord) -> Result<Vec<ReleaseSumm
         return Ok(output);
     }
     for entry in fs::read_dir(releases_dir)? {
-        let path = entry?.path().join("manifest.template.json");
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path().join("manifest.template.json");
         if !path.is_file() {
             continue;
         }
@@ -943,6 +1414,7 @@ fn load_releases(root: &FsPath, device: &DeviceRecord) -> Result<Vec<ReleaseSumm
                 artifact_sha256: template.manifest.artifact_sha256,
                 artifact_type: template.manifest.artifact_type,
                 policy_slot: template.manifest.policy_slot,
+                component: template.manifest.component,
             });
         }
     }
@@ -960,12 +1432,22 @@ fn sign_manifest(manifest: &Manifest, key: &SigningKey) -> Result<ManifestEnvelo
 
 /// Signs an Aliyun OSS GET URL using Unix timestamp in **seconds**.
 pub fn oss_signed_url(config: &Config, object_key: &str, now_secs: i64) -> Result<String> {
-    let expires = now_secs.saturating_add(config.signed_url_ttl_seconds as i64);
-    let resource = format!(
-        "/{}/{}",
-        config.oss_bucket,
-        object_key.trim_start_matches('/')
+    let bucket = config.oss_bucket.trim();
+    let endpoint = config
+        .oss_endpoint
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    let key = object_key.trim().trim_start_matches('/');
+    ensure!(!bucket.is_empty(), "oss_bucket_empty");
+    ensure!(!endpoint.is_empty(), "oss_endpoint_empty");
+    ensure!(
+        !key.is_empty() && !key.contains("..") && !key.contains('?') && !key.contains('#'),
+        "oss_object_key_invalid"
     );
+    let expires = now_secs.saturating_add(config.signed_url_ttl_seconds as i64);
+    let resource = format!("/{bucket}/{key}");
     let string_to_sign = format!("GET\n\n\n{expires}\n{resource}");
     let mut mac = HmacSha1::new_from_slice(config.oss_access_key_secret.as_bytes())
         .map_err(|_| anyhow::anyhow!("oss_secret_invalid"))?;
@@ -976,13 +1458,7 @@ pub fn oss_signed_url(config: &Config, object_key: &str, now_secs: i64) -> Resul
         .append_pair("Expires", &expires.to_string())
         .append_pair("Signature", &signature)
         .finish();
-    Ok(format!(
-        "https://{}.{}/{}?{}",
-        config.oss_bucket,
-        config.oss_endpoint,
-        object_key.trim_start_matches('/'),
-        query
-    ))
+    Ok(format!("https://{bucket}.{endpoint}/{key}?{query}"))
 }
 
 fn load_jobs(root: &FsPath) -> Result<HashMap<String, Job>> {
@@ -1003,22 +1479,29 @@ fn load_jobs(root: &FsPath) -> Result<HashMap<String, Job>> {
 }
 
 fn persist_job(root: &FsPath, job: &Job) -> Result<()> {
-    let directory = root.join("jobs");
-    fs::create_dir_all(&directory)?;
-    let path = directory.join(format!("{}.json", job.job_id));
-    let temp = directory.join(format!("{}.{}.tmp", job.job_id, Uuid::new_v4()));
-    fs::write(&temp, serde_json::to_vec_pretty(job)?)?;
+    atomic_write_json(&root.join("jobs").join(format!("{}.json", job.job_id)), job)
+}
+
+pub(crate) fn atomic_write_json<T: Serialize>(path: &FsPath, value: &T) -> Result<()> {
+    let directory = path.parent().context("atomic_write_missing_parent")?;
+    fs::create_dir_all(directory)?;
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state");
+    let temp = directory.join(format!("{stem}.{}.tmp", Uuid::new_v4()));
+    fs::write(&temp, serde_json::to_vec_pretty(value)?)?;
     let file = fs::OpenOptions::new().read(true).write(true).open(&temp)?;
     file.sync_all()?;
     drop(file);
-    if let Err(error) = fs::rename(&temp, &path) {
+    if let Err(error) = fs::rename(&temp, path) {
         if error.kind() != std::io::ErrorKind::PermissionDenied || !path.exists() {
             let _ = fs::remove_file(&temp);
             return Err(error.into());
         }
         // Windows std::fs::rename cannot replace an existing file.
-        fs::remove_file(&path)?;
-        fs::rename(&temp, &path)?;
+        fs::remove_file(path)?;
+        fs::rename(&temp, path)?;
     }
     Ok(())
 }
@@ -1686,5 +2169,1074 @@ mod tests {
         .unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].device_id, "SUNRISE-S100P-RUST-013");
+    }
+
+    #[test]
+    fn device_bucket_is_deterministic_and_within_1_to_100() {
+        let b1 = device_bucket("ro-2026-001", "dog-013");
+        let b2 = device_bucket("ro-2026-001", "dog-013");
+        assert_eq!(b1, b2);
+        assert!((1..=100).contains(&b1));
+
+        let mut in_half = 0usize;
+        for i in 0..200 {
+            let b = device_bucket("ro-dist-check", &format!("dev-{i:04}"));
+            assert!((1..=100).contains(&b));
+            if b <= 50 {
+                in_half += 1;
+            }
+        }
+        // Reasonable spread around 50% across 200 devices.
+        assert!((70..=130).contains(&in_half), "in_half={in_half}");
+    }
+
+    #[tokio::test]
+    async fn canary_rollout_auto_assign_promote_and_circuit_breaker_on_rollback() {
+        let dir = TestDir::new();
+        // Mix of legacy record (omitting ring/tags -> defaults to prod/[]) and ringed/tagged devices.
+        let devices = serde_json::json!({
+            "canary-1": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "canary", "tags": ["dog3", "rdk-s100p"] },
+            "canary-2": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "canary", "tags": ["dog3"] },
+            "prod-1": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "prod", "tags": ["dog3"] },
+            "prod-2": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "prod", "tags": ["dog3"] },
+            "prod-legacy": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true }
+        });
+        let (config, _key) = write_test_env(
+            dir.path(),
+            devices,
+            base_template_manifest("rel-canary-1", 0, 0),
+            "firmware/qa/rel-canary-1/brainstem.tar.gz",
+            "rel-canary-1",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config.clone()).unwrap();
+
+        let create_body = serde_json::to_vec(&serde_json::json!({
+            "rolloutId": "ro-test-001",
+            "releaseId": "rel-canary-1",
+            "targetModel": "THUNDER 01",
+            "targetHardwareRevision": "rdk-s100p",
+            "targetTags": ["dog3"],
+            "stages": [
+                { "name": "canary", "ring": "canary", "percent": 100, "maxDevices": 1, "bakeSeconds": 0, "autoPromote": false },
+                { "name": "prod-100", "ring": "prod", "percent": 100, "bakeSeconds": 0, "autoPromote": false }
+            ],
+            "circuitBreaker": { "maxFailureCount": 1, "maxFailureRate": 0.05 }
+        }))
+        .unwrap();
+
+        // Unauthorized create -> 401.
+        let r_unauth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(create_body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // Create rollout -> 201 Created, Stage 0 active.
+        let r_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(create_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_create.status(), StatusCode::CREATED);
+        let created: RolloutView = serde_json::from_slice(
+            &axum::body::to_bytes(r_create.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(created.campaign.rollout_id, "ro-test-001");
+        assert_eq!(created.campaign.status, RolloutStatus::Active);
+        assert_eq!(created.campaign.current_stage_index, 0);
+
+        // Prod device polling during canary Stage 0 gets 204 No Content.
+        let r_prod_early = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/prod-1/firmware/next-job")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_prod_early.status(), StatusCode::NO_CONTENT);
+
+        // Canary-1 polls -> auto-scheduled job!
+        let r_c1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/canary-1/firmware/next-job")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_c1.status(), StatusCode::OK);
+        let c1_job: Job = serde_json::from_slice(
+            &axum::body::to_bytes(r_c1.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(c1_job.rollout_id.as_deref(), Some("ro-test-001"));
+
+        // Canary-2 blocked by Stage 0 maxDevices=1 -> 204 No Content.
+        let r_c2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/canary-2/firmware/next-job")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_c2.status(), StatusCode::NO_CONTENT);
+
+        // Canary-1 reports waiting_safe_window, then succeeded.
+        let r_wait = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/devices/canary-1/firmware/jobs/{}/report",
+                        c1_job.job_id
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"phase":"waiting_safe_window","message":"cms_state_not_grounded: walking"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_wait.status(), StatusCode::OK);
+
+        let r_view_wait = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rollouts/ro-test-001")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let view_wait: RolloutView = serde_json::from_slice(
+            &axum::body::to_bytes(r_view_wait.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(view_wait.stage_counts[0].waiting_safe_window, 1);
+
+        let r_c1_ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/devices/canary-1/firmware/jobs/{}/report",
+                        c1_job.job_id
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"phase":"succeeded"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_c1_ok.status(), StatusCode::OK);
+
+        // Manually promote to Stage 1 (prod-100).
+        let r_prom = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts/ro-test-001/promote")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_prom.status(), StatusCode::OK);
+        let promoted: RolloutView = serde_json::from_slice(
+            &axum::body::to_bytes(r_prom.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(promoted.campaign.current_stage_index, 1);
+
+        // prod-legacy lacks tag "dog3" -> 204 No Content.
+        let r_legacy = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/prod-legacy/firmware/next-job")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_legacy.status(), StatusCode::NO_CONTENT);
+
+        // prod-1 polls -> auto-assigned job!
+        let r_p1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/prod-1/firmware/next-job")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_p1.status(), StatusCode::OK);
+        let p1_job: Job = serde_json::from_slice(
+            &axum::body::to_bytes(r_p1.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        // prod-1 reports rolled_back -> Circuit Breaker trips immediately to PausedCircuitOpen!
+        let r_rb = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/devices/prod-1/firmware/jobs/{}/report",
+                        p1_job.job_id
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"phase":"rolled_back","message":"health_timeout"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_rb.status(), StatusCode::OK);
+
+        let r_tripped = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rollouts/ro-test-001")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tripped: RolloutView = serde_json::from_slice(
+            &axum::body::to_bytes(r_tripped.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tripped.campaign.status, RolloutStatus::PausedCircuitOpen);
+        assert!(tripped.circuit_breaker_state.open);
+        assert_eq!(tripped.circuit_breaker_state.failure_count, 1);
+
+        // prod-2 polling AFTER circuit opens MUST receive 204 No Content!
+        let r_p2_blocked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/prod-2/firmware/next-job")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_p2_blocked.status(), StatusCode::NO_CONTENT);
+
+        // Resume -> Pause -> Abort lifecycle works & persists across router restart.
+        let r_resume = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts/ro-test-001/resume")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_resume.status(), StatusCode::OK);
+
+        let r_pause = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts/ro-test-001/pause")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_pause.status(), StatusCode::OK);
+
+        let r_abort = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts/ro-test-001/abort")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_abort.status(), StatusCode::OK);
+
+        // Reload fresh router from disk and verify list returns persisted aborted rollout.
+        let reloaded = build_router(config).unwrap();
+        let r_list = reloaded
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rollouts")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_list.status(), StatusCode::OK);
+        let views: Vec<RolloutView> = serde_json::from_slice(
+            &axum::body::to_bytes(r_list.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].campaign.status, RolloutStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn rollout_auto_promotes_and_completes_when_bake_elapsed_with_zero_failures() {
+        let dir = TestDir::new();
+        let devices = serde_json::json!({
+            "canary-a": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "canary", "tags": [] },
+            "prod-a": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "prod", "tags": [] }
+        });
+        let (config, _key) = write_test_env(
+            dir.path(),
+            devices,
+            base_template_manifest("rel-auto-1", 0, 0),
+            "firmware/qa/rel-auto-1/brainstem.tar.gz",
+            "rel-auto-1",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        let create_body = serde_json::to_vec(&serde_json::json!({
+            "rolloutId": "ro-auto-001",
+            "releaseId": "rel-auto-1",
+            "stages": [
+                { "name": "canary", "ring": "canary", "percent": 100, "bakeSeconds": 0, "autoPromote": true },
+                { "name": "prod-all", "ring": "prod", "percent": 100, "bakeSeconds": 0, "autoPromote": true }
+            ]
+        }))
+        .unwrap();
+        let r_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(create_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_create.status(), StatusCode::CREATED);
+
+        // Canary-a polls and succeeds -> auto-promotes to Stage 1!
+        let r_c = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/agent/devices/canary-a/next-job")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_c.status(), StatusCode::OK);
+        let job_c: Job = serde_json::from_slice(
+            &axum::body::to_bytes(r_c.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let r_c_ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/agent/devices/canary-a/jobs/{}/report",
+                        job_c.job_id
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"phase":"succeeded"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_c_ok.status(), StatusCode::OK);
+
+        let r_mid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rollouts/ro-auto-001")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mid: RolloutView = serde_json::from_slice(
+            &axum::body::to_bytes(r_mid.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mid.campaign.current_stage_index, 1);
+        assert_eq!(mid.campaign.status, RolloutStatus::Active);
+
+        // Prod-a polls and succeeds -> auto-completes rollout!
+        let r_p = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/agent/devices/prod-a/next-job")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_p.status(), StatusCode::OK);
+        let job_p: Job = serde_json::from_slice(
+            &axum::body::to_bytes(r_p.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let r_p_ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/agent/devices/prod-a/jobs/{}/report",
+                        job_p.job_id
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"phase":"succeeded"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_p_ok.status(), StatusCode::OK);
+
+        let r_end = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rollouts/ro-auto-001")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let end: RolloutView = serde_json::from_slice(
+            &axum::body::to_bytes(r_end.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(end.campaign.status, RolloutStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn release_bundle_signs_bundle_items_without_bucket_root_url() {
+        let dir = TestDir::new();
+        let bundle_manifest = serde_json::json!({
+            "manifestVersion": 1,
+            "releaseId": "rel-bundle-1",
+            "channel": "qa",
+            "sequence": 10,
+            "version": "2.0.0",
+            "issuedAtMs": 0,
+            "expiresAtMs": 0,
+            "model": "THUNDER 01",
+            "hardwareRevision": "rdk-s100p",
+            "minimumBootloaderVersion": "0.0.1",
+            "minimumBrainstemVersion": "0.0.1",
+            "minimumBatteryPercent": 20,
+            "artifactUrl": "",
+            "artifactSizeBytes": 0,
+            "artifactSha256": "",
+            "keyId": "old-key",
+            "rollbackPolicy": { "mode": "automatic", "healthTimeoutMs": 15000 },
+            "artifactType": "release_bundle",
+            "bundleItems": [
+                {
+                    "component": "brainstem",
+                    "version": "1.2.0",
+                    "artifactUrl": "https://placeholder.invalid/brainstem",
+                    "artifactSizeBytes": 10,
+                    "artifactSha256": Manifest::artifact_hash(b"0123456789")
+                },
+                {
+                    "component": "cloud-link",
+                    "version": "0.4.0",
+                    "artifactUrl": "https://placeholder.invalid/cloud-link",
+                    "artifactSizeBytes": 10,
+                    "artifactSha256": Manifest::artifact_hash(b"abcdefghij"),
+                    "requires": { "brainstem": "1.2.0" }
+                }
+            ]
+        });
+        let (config, key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "dev-1": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true }
+            }),
+            bundle_manifest,
+            "",
+            "rel-bundle-1",
+        );
+        fs::write(
+            dir.path()
+                .join("releases")
+                .join("rel-bundle-1")
+                .join("manifest.template.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "manifest": serde_json::from_slice::<serde_json::Value>(
+                    &fs::read(
+                        dir.path()
+                            .join("releases")
+                            .join("rel-bundle-1")
+                            .join("manifest.template.json")
+                    )
+                    .unwrap()
+                )
+                .unwrap()["manifest"],
+                "objectKey": "",
+                "bundleObjectKeys": {
+                    "brainstem": "firmware/qa/rel-bundle-1/brainstem.tar.gz",
+                    "cloud-link": "components/qa/rel-bundle-1/cloud-link.tar.gz"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/devices/dev-1/firmware/jobs")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"releaseId":"rel-bundle-1","idempotencyKey":"idem-bundle-1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
+        assert_eq!(
+            resp.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        let job: Job = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let decoded = job.manifest.decode(&key.verifying_key()).unwrap();
+        assert_eq!(decoded.artifact_type, ArtifactType::ReleaseBundle);
+        assert!(decoded.artifact_url.is_empty());
+        assert!(
+            decoded.bundle_items[0]
+                .artifact_url
+                .starts_with("https://doso-ota-prod-shanghai.oss-cn-shanghai.aliyuncs.com/firmware/qa/rel-bundle-1/brainstem.tar.gz?")
+        );
+        assert!(
+            decoded.bundle_items[1]
+                .artifact_url
+                .starts_with("https://doso-ota-prod-shanghai.oss-cn-shanghai.aliyuncs.com/components/qa/rel-bundle-1/cloud-link.tar.gz?")
+        );
+        let profile = doso_ota::DeviceProfile {
+            device_id: "dev-1".into(),
+            model: "THUNDER 01".into(),
+            hardware_revision: "rdk-s100p".into(),
+            bootloader_version: "1.0.0".into(),
+            brainstem_version: "1.0.0".into(),
+            current_version: "1.0.0".into(),
+            active_slot: doso_ota::Slot::A,
+            battery_percent: 90,
+            online: true,
+            task_running: false,
+            component_versions: BTreeMap::new(),
+        };
+        decoded.validate(now_ms(), &profile, 0).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_canary_stage_does_not_auto_promote_and_bake_waits_after_completion() {
+        let dir = TestDir::new();
+        let devices = serde_json::json!({
+            "prod-only": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "prod" }
+        });
+        let (config, _key) = write_test_env(
+            dir.path(),
+            devices,
+            base_template_manifest("rel-empty-stage", 0, 0),
+            "firmware/qa/rel-empty-stage/brainstem.tar.gz",
+            "rel-empty-stage",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        let r_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "rolloutId": "ro-no-empty-skip",
+                            "releaseId": "rel-empty-stage",
+                            "stages": [
+                                { "name": "canary", "ring": "canary", "percent": 100, "bakeSeconds": 0, "autoPromote": true },
+                                { "name": "prod", "ring": "prod", "percent": 100, "bakeSeconds": 0, "autoPromote": true }
+                            ]
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_create.status(), StatusCode::CREATED);
+
+        // Prod device must NOT receive job when canary stage has 0 eligible devices.
+        let r_prod = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/agent/devices/prod-only/next-job")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_prod.status(), StatusCode::NO_CONTENT);
+
+        let r_view = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rollouts/ro-no-empty-skip")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let view: RolloutView = serde_json::from_slice(
+            &axum::body::to_bytes(r_view.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(view.campaign.current_stage_index, 0);
+        assert_eq!(view.campaign.status, RolloutStatus::Active);
+
+        // Unit check: bakeSeconds > 0 waits after device completion timestamp.
+        let mut campaign = view.campaign;
+        campaign.stages[0].ring = "prod".into();
+        campaign.stages[0].bake_seconds = 60;
+        campaign.stage_started_at_ms = 1_000;
+        campaign.device_states.insert(
+            "prod-only".into(),
+            RolloutDeviceState {
+                device_id: "prod-only".into(),
+                stage_index: 0,
+                job_id: "j1".into(),
+                phase: "succeeded".into(),
+                assigned_at_ms: 50_000,
+                updated_at_ms: 100_000,
+                message: None,
+            },
+        );
+        let reg = HashMap::from([(
+            "prod-only".into(),
+            DeviceRecord {
+                model: "THUNDER 01".into(),
+                hardware_revision: "rdk-s100p".into(),
+                enabled: true,
+                ring: "prod".into(),
+                tags: vec![],
+            },
+        )]);
+        assert!(!maybe_auto_promote(&mut campaign, &reg, 159_999));
+        assert!(maybe_auto_promote(&mut campaign, &reg, 160_000));
+        assert_eq!(campaign.current_stage_index, 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_rollout_job_syncs_rollout_state_and_guards_terminal_cancel() {
+        let dir = TestDir::new();
+        let devices = serde_json::json!({
+            "canary-1": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "canary" }
+        });
+        let (config, _key) = write_test_env(
+            dir.path(),
+            devices,
+            base_template_manifest("rel-cancel-1", 0, 0),
+            "firmware/qa/rel-cancel-1/brainstem.tar.gz",
+            "rel-cancel-1",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        // Unauthorized request returns WWW-Authenticate: Bearer.
+        let r_unauth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rollouts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_unauth.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            r_unauth.headers().get("www-authenticate").unwrap(),
+            "Bearer"
+        );
+
+        // Idempotency key conflict returns 409.
+        let r_start = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/devices/canary-1/firmware/jobs")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"releaseId":"rel-cancel-1","idempotencyKey":"idem-fixed"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_start.status(), StatusCode::ACCEPTED);
+        let manual_job: Job = serde_json::from_slice(
+            &axum::body::to_bytes(r_start.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        let r_conflict = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/devices/canary-1/firmware/jobs")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"releaseId":"rel-other","idempotencyKey":"idem-fixed"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_conflict.status(), StatusCode::CONFLICT);
+
+        // Cancel manual job so canary-1 is free for rollout assignment.
+        let r_cancel_manual = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/devices/canary-1/firmware/jobs/{}/cancel",
+                        manual_job.job_id
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_cancel_manual.status(), StatusCode::OK);
+
+        // Create rollout and assign job to canary-1.
+        let r_ro = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "rolloutId": "ro-cancel-sync",
+                            "releaseId": "rel-cancel-1",
+                            "stages": [
+                                { "name": "canary", "ring": "canary", "percent": 100, "bakeSeconds": 0, "autoPromote": false }
+                            ]
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_ro.status(), StatusCode::CREATED);
+
+        let r_next = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/agent/devices/canary-1/next-job")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_next.status(), StatusCode::OK);
+        let ro_job: Job = serde_json::from_slice(
+            &axum::body::to_bytes(r_next.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        // Transition to waiting_safe_window, then cancel -> rollout device state updates to cancelled!
+        let r_wait = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/agent/devices/canary-1/jobs/{}/report",
+                        ro_job.job_id
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"phase":"waiting_safe_window"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_wait.status(), StatusCode::OK);
+
+        let r_cancel = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/devices/canary-1/firmware/jobs/{}/cancel",
+                        ro_job.job_id
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_cancel.status(), StatusCode::OK);
+
+        let r_view = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rollouts/ro-cancel-sync")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let view: RolloutView = serde_json::from_slice(
+            &axum::body::to_bytes(r_view.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(view.stage_counts[0].in_progress, 0);
+        assert_eq!(view.stage_counts[0].waiting_safe_window, 0);
+        assert_eq!(view.campaign.device_states["canary-1"].phase, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_post_routes_reject_with_401_before_body_extraction() {
+        let dir = TestDir::new();
+        let (config, _key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "dev-1": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true }
+            }),
+            base_template_manifest("rel-auth-1", 0, 0),
+            "firmware/qa/rel-auth-1/brainstem.tar.gz",
+            "rel-auth-1",
+        );
+        let app = build_router(config).unwrap();
+
+        let post_paths = [
+            "/v1/rollouts",
+            "/v1/devices/dev-1/firmware/jobs",
+            "/v1/apps/android/releases",
+            "/v1/agent/devices/dev-1/status",
+            "/v1/agent/devices/dev-1/jobs/job-1/report",
+            "/v1/devices/dev-1/firmware/jobs/job-1/report",
+            "/v1/devices/dev-1/firmware/jobs/job-1/cancel",
+            "/v1/rollouts/ro-1/promote",
+            "/v1/rollouts/ro-1/pause",
+            "/v1/rollouts/ro-1/resume",
+            "/v1/rollouts/ro-1/abort",
+        ];
+
+        for path in post_paths {
+            // Invalid empty JSON object must return 401 (never 422 schema leak).
+            let r_json = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r_json.status(), StatusCode::UNAUTHORIZED, "path={path}");
+            assert_eq!(r_json.headers().get("www-authenticate").unwrap(), "Bearer");
+
+            // Missing Content-Type must return 401 (never 415).
+            let r_no_ct = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r_no_ct.status(), StatusCode::UNAUTHORIZED, "path={path}");
+        }
+
+        // Public endpoints remain reachable without Authorization.
+        let r_health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_health.status(), StatusCode::OK);
+
+        let r_android = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/apps/android/latest?channel=prod&version_code=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_android.status(), StatusCode::NOT_FOUND);
     }
 }

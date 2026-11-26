@@ -29,6 +29,8 @@ Use these sources of truth:
 
 - `D:/DOSO/robot-cloud/ota` for the Rust robot updater `doso-ota`.
 - `D:/DOSO/robot-cloud/cloud/release` for the Rust domestic release API `doso-ota-release`.
+- `D:/DOSO/robot-cloud/CONTRACT.md` for the wire/HTTP/safety contract (`## OTA release and agent contract`).
+- `D:/DOSO/robot-cloud/docs/OTA_PRODUCTION_RUNBOOK.md` and `tools/deploy/doso-ota-ops.py` for packaging, OSS upload, release templates, device provisioning, and canary->prod rollout operations.
 - `C:/Users/99563/Documents/ChatGPT/New project/doso-app/docs/production/DOSO_OTA_RELEASE_MANAGEMENT.md`.
 - `C:/Users/99563/Documents/ChatGPT/New project/doso-app/docs/production/DOSO_OTA_IMPLEMENTATION_PLAN.md`.
 - `C:/Users/99563/Documents/ChatGPT/New project/doso-app/docs/production/DOSO_OTA_DOMESTIC_DEPLOYMENT.md`.
@@ -95,4 +97,4 @@ Do not report a plan item as complete until it has evidence at the same boundary
 
 ## Current implementation boundary
 
-The Rust agent and release API are implemented and locally tested. A source implementation is not evidence of a created OSS bucket, a deployed ECS service, a formal HTTPS route, an ARM64 robot install, or a physical OTA result. Keep those claims separate until observed.
+The Rust agent (`doso-ota`, supporting `brainstem_release`, `policy_package`, `component_release`, `release_bundle`, and safety pre-checks) and domestic release API (`doso-ota-release`, supporting canary->prod rollouts, circuit breaker, device status inventory, and Android APK metadata) are implemented and locally unit/E2E tested. Operator CLI tooling lives in `tools/deploy/doso-ota-ops.py`, and ThingsBoard `cloud/console` has no `doso-ota-release` integration. A source implementation is not evidence of a formal production domain cutover, a full fleet rollout, or a physical single-robot rollback run — record live ECS and robot acceptance evidence separately in `docs/OTA_PRODUCTION_RUNBOOK.md` and `TESTING.md`.

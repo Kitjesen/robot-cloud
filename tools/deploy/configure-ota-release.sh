@@ -15,7 +15,9 @@ fi
 config_dir=/etc/doso/ota-release
 env_file="$config_dir/release.env"
 key_file="$config_dir/release-signing.key.pem"
+pub_file="$config_dir/release-signing.pub.pem"
 test -f "$config_dir/devices.json"
+python3 -m json.tool "$config_dir/devices.json" >/dev/null
 
 read -r -p 'OSS AccessKey ID: ' oss_access_key_id
 read -r -s -p 'OSS AccessKey Secret: ' oss_access_key_secret
@@ -24,11 +26,23 @@ test -n "$oss_access_key_id"
 test -n "$oss_access_key_secret"
 
 install -d -o root -g doso-release -m 750 "$config_dir"
+install -d -o doso-release -g doso-release -m 750 \
+    /var/lib/doso-ota-release \
+    /var/lib/doso-ota-release/releases \
+    /var/lib/doso-ota-release/jobs \
+    /var/lib/doso-ota-release/rollouts \
+    /var/lib/doso-ota-release/status \
+    /var/lib/doso-ota-release/apps \
+    /var/lib/doso-ota-release/apps/android
 if test ! -f "$key_file"; then
     openssl genpkey -algorithm ED25519 -out "$key_file" >/dev/null 2>&1
     chown root:doso-release "$key_file"
     chmod 640 "$key_file"
 fi
+openssl pkey -in "$key_file" -pubout -out "$pub_file" >/dev/null 2>&1
+chown root:doso-release "$pub_file"
+chmod 644 "$pub_file"
+pub_sha256="$(openssl pkey -pubin -in "$pub_file" -outform DER | sha256sum | awk '{ print $1 }')"
 
 api_token="$(openssl rand -hex 32)"
 umask 077
@@ -54,6 +68,7 @@ if "$start_service"; then
     systemctl enable --now doso-ota-release.service
     curl --fail --silent --show-error http://127.0.0.1:8140/health
     printf '\n'
+    printf 'release_signing_pub=%s der_sha256=%s\n' "$pub_file" "$pub_sha256"
 else
-    printf '%s\n' 'Configured release.env and signing key; service remains stopped.'
+    printf 'Configured release.env and signing key (%s der_sha256=%s); service remains stopped.\n' "$pub_file" "$pub_sha256"
 fi

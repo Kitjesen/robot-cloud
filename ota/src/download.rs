@@ -5,20 +5,42 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::Path,
+    time::Duration,
 };
 
 pub async fn download_resumable(url: &str, destination: &Path, size: u64) -> Result<u64> {
     let partial = destination.with_extension("part");
     let journal = destination.with_extension("journal");
     let mut offset = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
-    ensure!(offset <= size, "partial_download_too_large");
-    if let Ok(value) = fs::read_to_string(&journal) {
-        ensure!(
-            value.trim().parse::<u64>().ok() == Some(offset),
-            "download_journal_mismatch"
-        );
+    if offset > size {
+        let _ = fs::remove_file(&partial);
+        let _ = fs::remove_file(&journal);
+        offset = 0;
+    } else if let Ok(value) = fs::read_to_string(&journal) {
+        match value.trim().parse::<u64>() {
+            Ok(recorded) if recorded == offset => {}
+            Ok(recorded) if recorded < offset && recorded <= size => {
+                // Rewind partial file after a torn write between chunk flush and journal write.
+                if let Ok(file) = OpenOptions::new().write(true).open(&partial)
+                    && file.set_len(recorded).is_ok()
+                {
+                    offset = recorded;
+                } else {
+                    let _ = fs::remove_file(&partial);
+                    let _ = fs::remove_file(&journal);
+                    offset = 0;
+                }
+            }
+            _ => {
+                let _ = fs::remove_file(&partial);
+                let _ = fs::remove_file(&journal);
+                offset = 0;
+            }
+        }
     }
-    let mut builder = reqwest::Client::builder();
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(30));
     if url::Url::parse(url)
         .ok()
         .and_then(|u| {
@@ -189,6 +211,54 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), b"abcdef");
         assert!(!partial.exists());
         assert!(!journal.exists());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn recovers_from_torn_partial_ahead_of_journal() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/artifact",
+            get(|request: Request<Body>| async move {
+                let start = request
+                    .headers()
+                    .get("range")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("bytes="))
+                    .and_then(|value| value.strip_suffix("-"))
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let bytes = b"abcdef";
+                let body = Body::from(bytes[start..].to_vec());
+                if start == 0 {
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(body)
+                        .unwrap()
+                } else {
+                    Response::builder()
+                        .status(StatusCode::PARTIAL_CONTENT)
+                        .header("content-length", bytes.len() - start)
+                        .body(body)
+                        .unwrap()
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("artifact");
+        let partial = destination.with_extension("part");
+        let journal = destination.with_extension("journal");
+        // Simulate crash after writing 4 bytes (including 1 garbage byte) before journal updated past 3.
+        fs::write(&partial, b"abcX").unwrap();
+        fs::write(&journal, b"3").unwrap();
+        download_resumable(&format!("http://{address}/artifact"), &destination, 6)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"abcdef");
         server.abort();
     }
 }

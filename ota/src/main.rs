@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
-use doso_ota::{CloudPollConfig, SystemHealthCheck, Updater, UpdaterConfig, serve_with_cloud};
-use std::{net::SocketAddr, path::PathBuf};
+use doso_ota::{
+    CloudPollConfig, DEFAULT_KEEP_HISTORY, DEFAULT_MIN_VBUS_V, DEFAULT_OTA_UNIT,
+    HttpSafetyPreCheck, SystemHealthCheck, Updater, UpdaterConfig, serve_with_cloud,
+};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 fn env_path_opt(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
@@ -28,11 +31,36 @@ fn default_staging_dir() -> Option<PathBuf> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let command = std::env::args().nth(1).unwrap_or_else(|| "inspect".into());
+    if matches!(command.as_str(), "--version" | "-V" | "version") {
+        println!("doso-ota {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if matches!(command.as_str(), "--help" | "-h" | "help") {
+        println!("usage: doso-ota <inspect | job | serve | version>");
+        return Ok(());
+    }
     let root = env_path_opt("DOSO_OTA_ROOT").unwrap_or_else(|| "/var/lib/doso-ota".into());
     let staging_dir = env_path_opt("DOSO_OTA_STAGING_DIR").or_else(default_staging_dir);
     let releases_dir = env_path_opt("DOSO_OTA_RELEASES_DIR");
     let current_link = env_path_opt("DOSO_OTA_CURRENT_LINK");
     let last_good_link = env_path_opt("DOSO_OTA_LAST_GOOD_LINK");
+    let components_root = env_path_opt("DOSO_OTA_COMPONENTS_ROOT");
+    let keep_history = std::env::var("DOSO_OTA_KEEP_HISTORY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_KEEP_HISTORY);
+    let require_can_read_only = matches!(
+        std::env::var("DOSO_OTA_REQUIRE_CAN_READ_ONLY")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1" | "true" | "TRUE" | "yes")
+    );
+    let min_vbus_v = std::env::var("DOSO_OTA_MIN_VBUS_V")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(DEFAULT_MIN_VBUS_V);
+    let ota_unit = env_str_opt("DOSO_OTA_UNIT").unwrap_or_else(|| DEFAULT_OTA_UNIT.into());
 
     let config = UpdaterConfig {
         root,
@@ -62,11 +90,19 @@ async fn main() -> Result<()> {
         releases_dir,
         current_link,
         last_good_link,
+        components_root,
+        keep_history,
+        require_can_read_only,
+        min_vbus_v,
+        ota_unit,
         policy_admin_url: env_str_opt("DOSO_POLICY_ADMIN_URL"),
         policy_admin_token: env_str_opt("DOSO_POLICY_ADMIN_TOKEN"),
         allow_insecure_http_loopback: std::env::var("DOSO_OTA_ALLOW_HTTP").as_deref() == Ok("1"),
     };
-    let updater = Updater::new(config)?;
+    let mut updater = Updater::new(config)?;
+    if let Ok(safety) = HttpSafetyPreCheck::from_env() {
+        updater = updater.with_safety_check(Arc::new(safety));
+    }
     match command.as_str() {
         "inspect" => println!("{}", serde_json::to_string_pretty(&updater.profile())?),
         "job" => println!("{}", serde_json::to_string_pretty(&updater.job()?)?),

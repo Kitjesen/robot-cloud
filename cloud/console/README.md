@@ -93,6 +93,8 @@ docker compose -f D:\DOSO\robot-cloud\cloud\console\compose.yml down
 
 此命令只停止新前端，不删除后台、设备、账号或数据库卷。修改菜单只改变入口，不替代后端权限检查。当前独立实例用于模拟设备验证；客户业务与 DOSO 人员访问边界以 [产品合同](../../CONTRACT.md#客户数据与告警责任) 为准。
 
+> **OTA 边界**：`cloud/console`（ThingsBoard CE 4.3.1.8）仅用于设备遥测、告警与看板展示，**未接入** `doso-ota-release`（`:8140` / `/ota/`）接口，Nginx 也仅代理 ThingsBoard 原生路径。侧栏高级菜单中保留的上游 `/features/otaUpdates` 指向 ThingsBoard 原生包接口，不应用于 `doso-ota` 固件或策略发布；正式 OTA 发布、灰度与熔断统一使用 `tools/deploy/doso-ota-ops.py` 与 `docs/OTA_PRODUCTION_RUNBOOK.md`。
+
 ## 验证范围
 
 部署前检查 Compose、Nginx 配置与构建脚本。HTTP/API检查覆盖登录会话、设备列表、详情、搜索、直接路由和未授权API；WebSocket已验证一次设备属性订阅。其余页面交互、生产OAuth、正式云端和客户数据隔离继续按实际环境分别验收。

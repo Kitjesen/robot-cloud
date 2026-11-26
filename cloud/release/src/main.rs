@@ -22,9 +22,16 @@ async fn main() -> Result<()> {
         oss_endpoint: required("DOSO_OSS_ENDPOINT")?,
         oss_access_key_id: required("DOSO_OSS_ACCESS_KEY_ID")?,
         oss_access_key_secret: required("DOSO_OSS_ACCESS_KEY_SECRET")?,
-        signed_url_ttl_seconds: env::var("DOSO_OSS_SIGNED_URL_TTL_SECONDS")
-            .unwrap_or_else(|_| "1800".into())
-            .parse()?,
+        signed_url_ttl_seconds: {
+            let ttl: u64 = env::var("DOSO_OSS_SIGNED_URL_TTL_SECONDS")
+                .unwrap_or_else(|_| "1800".into())
+                .parse()?;
+            anyhow::ensure!(
+                (60..=86_400).contains(&ttl),
+                "DOSO_OSS_SIGNED_URL_TTL_SECONDS must be between 60 and 86400"
+            );
+            ttl
+        },
     };
     let bind = env::var("DOSO_RELEASE_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8140".into())

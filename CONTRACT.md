@@ -199,6 +199,8 @@ Brainstem `GetControlStatus`; it cannot issue motion or acquire control.
 ## Programs and authority
 
 - `robot/`: robot Linux cloud-link process; outbound MQTT, local gRPC read, signed reply.
+- `ota/`: robot Linux OTA updater (`doso-ota`); Ed25519 manifest verification, resumable download, multi-component atomic slots, `:5054` policy hot-push, health verification and auto-rollback.
+- `cloud/release/`: ECS domestic release API (`doso-ota-release`); device/ring registry, OSS URL signing, Ed25519 manifest signing, canary/prod rollout campaigns with circuit breaker, device status inventory and Android APK updates.
 - `cloud/gateway/`: ECS process; authenticated internal HTTP to MQTT request/reply.
 - `cloud/broker/`: ECS Mosquitto templates; mTLS identities and exact topic ACLs.
 - `shared/`: wire validation and client connection configuration used by both.
@@ -595,3 +597,18 @@ permission whose stop has not been confirmed. The App never keeps this loop aliv
 App 真源位于 `C:\Users\99563\Documents\ChatGPT\New project\doso-app`。登录 IP 已在源码中接入：迁移 `supabase/migrations/20261112020000_add_login_history.sql` 的 `capture_account_login` 从已验证的 `auth.sessions` 读取当前 `session_id` 对应的 `created_at` 与 `ip`，以幂等的 `account.login` 审计记录保存；`account-sessions` 的 `capture_login` 和 `list_login_history` 只允许当前认证账号使用。查询最多返回 50 条 `{id, loggedInAt, ipAddress, method}`，未知 IP 为 `null`，客户端不能提交 IP 或账号标识。完整字段与调用方式见 App [账号登录 IP 自查 API](<C:/Users/99563/Documents/ChatGPT/New project/doso-app/docs/production/DOSO_ACCOUNT_LOGIN_IP_API.md>)。
 
 本段源码和本地回归已完成，但迁移、匹配的 Edge Function、可信代理修正和真实账号登录读回尚未部署/验收。认证 IP 只有在反向代理覆盖伪造的 `X-Forwarded-For`、限制绕过入口并由 Auth 会话写入后才可作为可信来源；来源不明保持 `null`。账号登录 IP 永不代替 Broker 看到的机器人 MQTT socket peer，二者不共用字段、权限或查询接口。
+
+## OTA release and agent contract
+
+The OTA stack separates release custody, private OSS artifact storage, and robot-side execution:
+
+1. **Release API (`cloud/release/`, `doso-ota-release`)** binds `127.0.0.1:8140` behind Nginx HTTPS (`/ota/`). All routes except `GET /health` and `GET /v1/apps/android/latest` require `Authorization: Bearer <DOSO_RELEASE_API_TOKEN>`.
+2. **Device registry (`DOSO_RELEASE_DEVICE_REGISTRY`)** is a JSON map `{ "<deviceId>": { "model", "hardwareRevision", "enabled", "ring", "tags" } }`, reloaded per request (`ring` is `"dev" | "canary" | "prod"`, default `"prod"`). Do not confuse it with Gateway's `{"devices": [...]}` array file.
+3. **Manifest signing & OSS URLs**: Release templates (`<DOSO_RELEASE_ROOT>/releases/<releaseId>/manifest.template.json`) contain `{ "manifest": <Manifest>, "objectKey": "...", "bundleObjectKeys": {...}, "deltaObjectKey": "..." }` (where `bundleObjectKeys` maps `<component>` / `<component>:delta` for `release_bundle`). At dispatch time `doso-ota-release` stamps `issuedAtMs`/`expiresAtMs`, signs short-lived Aliyun OSS GET URLs using Unix timestamp **seconds** (`Expires`), and signs the canonical `Manifest` bytes with Ed25519 into `ManifestEnvelope` (`{"payload":"<b64url>","signature":"<b64url>"}`).
+4. **Artifact types (`ota/src/manifest.rs`)**:
+   - `brainstem_release` / `component_release`: `.tar.gz` verified for size, SHA-256, safe archive paths, and optional `SHA256SUMS`; installed atomically under `/opt/doso/components/<component>/{releases/<ver>,current,last-known-good}` (or legacy `/opt/doso/{releases,current,last-known-good}`), followed by allow-listed unit restart, health verification (`http://127.0.0.1:5054/health` flat signed or unsigned JSON), and automatic rollback on failure (`rolled_back` or `recovery_required`).
+   - `policy_package`: `.tar.gz` containing `policy.yaml`, ONNX model, and optional `golden.json`; pushed with zero Brainstem restart via `:5054/v1/policies/push` (`:5054/v1/policies/rollback` on post-mutation failure).
+   - `release_bundle`: ordered multi-component updates with topological `requires` checks and reverse-order rollback (`ota` self-upgrade is forbidden inside `release_bundle` and must use standalone `component_release` with `pending-self-upgrade.json` startup reconciliation).
+5. **Real-robot safety gate**: Before mutating Brainstem or activating a policy, `doso-ota` queries `:5054/health` and defers into `waiting_safe_window` (without failing the job) whenever `motor_output_enabled=true`, `cms_state != "grounded"`, `vbus_min_v < 44.0`, `battery_percent < minimumBatteryPercent`, or `task_running=true`. `DOSO_OTA_REQUIRE_CAN_READ_ONLY` defaults to `false`.
+6. **Canary rollouts & circuit breaker**: `POST /v1/rollouts` creates a staged `RolloutCampaign` (`dev|canary|prod`, deterministic `sha256(rolloutId + ":" + deviceId)` percentage bucketing, `maxDevices`, `bakeSeconds`, `autoPromote`). Any terminal failure (`rolled_back`, `failed`, `recovery_required`) exceeding `circuitBreaker` thresholds immediately transitions the rollout to `paused_circuit_open`, stopping dispatch to remaining devices.
+7. **Inventory heartbeat & Console boundary**: `doso-ota` polls `next-job`, reports phase/byte progress, and posts local `/health` + `/v1/policies` telemetry to `POST /v1/agent/devices/{deviceId}/status` (read via `GET /v1/devices/status` and `GET /v1/devices/{deviceId}/status`). `cloud/console` (ThingsBoard CE 4.3.1.8) is a separate telemetry UI with no `doso-ota-release` proxy or credentials; do not use ThingsBoard's stock `/features/otaUpdates` page for `doso-ota`. Operational workflow and CLI usage are documented in [docs/OTA_PRODUCTION_RUNBOOK.md](docs/OTA_PRODUCTION_RUNBOOK.md).
