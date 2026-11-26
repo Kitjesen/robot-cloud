@@ -324,6 +324,28 @@ class DosoOtaOpsTests(unittest.TestCase):
                 else:
                     os.environ[k] = old
 
+    def test_default_ota_cloud_url_uses_formal_domain(self) -> None:
+        old_url = os.environ.pop("DOSO_OTA_CLOUD_URL", None)
+        try:
+            parser = ops.build_parser()
+            fleet_args = parser.parse_args(["fleet-status"])
+            self.assertEqual(fleet_args.base_url, "https://api.dosorobotics.com/ota")
+            env_args = parser.parse_args(
+                [
+                    "render-robot-env",
+                    "--device-id",
+                    "dev-1",
+                    "--brainstem-version",
+                    "0.0.3",
+                    "--brainstem-release",
+                    "v0.0.3",
+                ]
+            )
+            self.assertEqual(env_args.cloud_url, "https://api.dosorobotics.com/ota")
+        finally:
+            if old_url is not None:
+                os.environ["DOSO_OTA_CLOUD_URL"] = old_url
+
 
 if __name__ == "__main__":
     unittest.main()

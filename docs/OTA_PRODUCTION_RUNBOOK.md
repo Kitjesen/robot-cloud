@@ -53,7 +53,7 @@ python tools/deploy/doso-ota-ops.py render-robot-env \
   --brainstem-version 0.0.3 \
   --brainstem-release v0.0.3 \
   --verify-key /etc/doso/ota-release-signing.pub.pem \
-  --cloud-url https://api-test.dosorobotics.com/ota \
+  --cloud-url https://api.dosorobotics.com/ota \
   --output /tmp/ota.env
 ```
 
@@ -133,7 +133,7 @@ Upload `./dist/bs-0.0.4.manifest.template.json` to `/var/lib/doso-ota-release/re
 
 ### Step 5 — Canary-to-Prod Rollout & Circuit Breaker Operations
 
-Set `DOSO_RELEASE_API_TOKEN` in your local shell (`DOSO_OTA_CLOUD_URL` defaults to `https://api-test.dosorobotics.com/ota` — switch to formal domain once DNS/备案 cutover completes).
+Set `DOSO_RELEASE_API_TOKEN` in your local shell (`DOSO_OTA_CLOUD_URL` defaults to `https://api.dosorobotics.com/ota`).
 
 ```bash
 # 1. Create canary -> prod-10 -> prod-100 rollout (circuit trips on 1st failure or >5%)
@@ -166,14 +166,14 @@ python tools/deploy/doso-ota-ops.py job start \
   --idempotency-key accept-dog3-bs-0.0.4
 ```
 
-## 4. Production Cutover Checklist (from `api-test` to Formal Domain)
+## 4. Production Cutover Status (`https://api.dosorobotics.com/ota`)
 
-Currently ECS has DNS + Let's Encrypt TLS provisioned for `api-test.dosorobotics.com` (`https://api-test.dosorobotics.com/ota/`); `api.dosorobotics.com` has no DNS A record yet. Before switching production fleets off `api-test.dosorobotics.com/ota/`:
+The formal OTA domain cutover completed on **2026-11-26**:
 
-1. Provision formal DNS A record, ICP filing, and TLS cert on Nginx for `api.dosorobotics.com` (preserve `client_max_body_size` sufficient for device status JSON, tight `proxy_read_timeout`, TLS 1.2/1.3, proxy `/ota/` -> `http://127.0.0.1:8140/`).
-2. Confirm `doso-ota-release.service` runs as `doso-release` with `NoNewPrivileges=true`, `PrivateTmp=true`, `ProtectHome=true`, `ReadWritePaths=/var/lib/doso-ota-release`, and valid `release-signing.key.pem` matching `/etc/doso/robot-cloud/ota/release-signing.pub.pem`.
-3. Verify unauthenticated requests to `/ota/v1/rollouts` and `/ota/v1/devices/status` return `401`, `/ota/health` returns `200`, and `verify-manifest` passes on a live signed job envelope.
-4. Update `DOSO_OTA_CLOUD_URL` on robots via staged `ota` / `ota.env` rollout.
+1. **DNS & TLS**: Authoritative `A` record `api.dosorobotics.com -> 47.103.89.137` configured in Aliyun ESA (`siteId=187245473806416`, DNS-only mode, mirrored in `dnsnext`); Let's Encrypt certificate issued via `--webroot` (valid through `2027-02-24`).
+2. **Minimal Nginx Exposure**: `/etc/nginx/sites-available/doso-api-prod-ota` redirects HTTP `:80` (except ACME) to HTTPS `:443`, and proxies **only `/ota/` -> `http://127.0.0.1:8140/`** (all other paths return `404`). Note: `api-test.dosorobotics.com` remains active separately for Supabase test functions and the 443 WSS ops tunnel (`/~!frp`).
+3. **Service Hardening & Live Acceptance**: `doso-ota-release.service` runs as `doso-release` with `NoNewPrivileges=true`, `PrivateTmp=true`, `ProtectHome=true`, `ReadWritePaths=/var/lib/doso-ota-release`. Verified `/ota/health` (`200`), unauthenticated `/ota/v1/devices/status` (`401`), and Dog3 end-to-end live policy OTA over `https://api.dosorobotics.com/ota` (Job `a8e1835d-dd45-4ab3-87a1-636a2a46bb72`, `sequence=202`, `724464 B`, `phase=succeeded`, `motor_output_enabled=false`, `vbus_min_v=53.27V`).
+4. **Remaining Robot Onboarding**: Migrate/onboard additional robots (e.g., `THUNDER-DEV-001` once reachable) to `DOSO_OTA_CLOUD_URL=https://api.dosorobotics.com/ota` and execute Channel A `brainstem_release` + bad-hash rollback acceptance on Dog3.
 
 ## 5. Git Release Hygiene (`D:\DOSO\robot-cloud`)
 

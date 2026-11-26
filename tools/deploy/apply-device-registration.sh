@@ -124,7 +124,7 @@ if grep -Fqx "user $device_id" "$acl_file"; then
     exit 1
 fi
 cat "$patch_dir/acl-entry.conf" >> "$acl_file"
-install -o root -g mosquitto -m 640 "$patch_dir/$key_name" "$gateway_dir/$key_name"
+install -o root -g doso-cloud -m 640 "$patch_dir/$key_name" "$gateway_dir/$key_name"
 chown mosquitto:mosquitto "$acl_file"
 chmod 640 "$acl_file"
 

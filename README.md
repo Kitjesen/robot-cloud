@@ -1,16 +1,21 @@
 # 机器狗云连接
 
-文档核对：2026-11-14。功能状态和下一阶段统一见 [PROGRESS.md](PROGRESS.md)，测试范围见 [TESTING.md](TESTING.md)；本轮真实交付证据见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。核对日期不代表重新部署或真机验收。
+文档核对：2026-11-26。项目交接全景见 [docs/HANDOVER_OTA_AND_ROBOT_20261126.md](docs/HANDOVER_OTA_AND_ROBOT_20261126.md)，功能状态和下一阶段统一见 [PROGRESS.md](PROGRESS.md)，测试范围见 [TESTING.md](TESTING.md)；早期真实交付证据见 [docs/DELIVERY_STATUS_20261113.md](docs/DELIVERY_STATUS_20261113.md)。核对日期不代表所有组件均已重新部署或真机验收。
 
-独立 Rust 工程位于 `D:\DOSO\robot-cloud`，源码按运行位置组织：`robot/` 运行在机器狗 Linux 主机，`cloud/` 部署到云服务器，`shared/` 编译进两端，`tools/` 放开发联调与部署工具。
+独立 Rust 工程位于 `D:\DOSO\robot-cloud`，源码按运行位置组织：`robot/` 与 `ota/`、`robot-authorizer/` 运行在机器狗 Linux 主机，`cloud/` 部署到云服务器，`shared/` 编译进两端，`tools/` 放开发联调、部署与反向运维工具。
 
-2026-11-17 新增账号授权的远控会话、双向 gRPC 中继和机端 Rust SDK 桥，首版支持 Claim、Hold、Release。完整代码路径、配置与交付顺序见 [远控交付](docs/REMOTE_CONTROL_DELIVERY.md)。本地组合验证使用 `cargo run --locked --offline -p lab -- control-check`，设备侧 Motion 为模拟实现，正式部署与真机结果维护在 PROGRESS.md 和 TESTING.md。
+- **2026-11-26 OTA 正式生产域名上线**：`doso-ota-release` 正式域名 `https://api.dosorobotics.com/ota` 已切流上线并完成 Dog3 `policy_package` 实包端到端验收，运维 CLI 位于 [tools/deploy/doso-ota-ops.py](tools/deploy/doso-ota-ops.py)，操作手册见 [OTA_PRODUCTION_RUNBOOK.md](docs/OTA_PRODUCTION_RUNBOOK.md)。
+- **2026-11-26 443 WSS 反向运维通道**：面向 5G CGNAT 环境上线自建 `frp v0.72.0` 回环隧道（[tools/ops-tunnel/](tools/ops-tunnel/README.md)），不改安全组、不暴露公网 SSH，已完成 3 号机与研发机 1 双机验通。
+- **2026-11-17 远控会话候选**：新增账号授权的远控会话、双向 gRPC 中继和机端 Rust SDK 桥，首版支持 Claim、Hold、Release。完整代码路径、配置与交付顺序见 [远控交付](docs/REMOTE_CONTROL_DELIVERY.md)。本地组合验证使用 `cargo run --locked --offline -p lab -- control-check`，设备侧 Motion 为模拟实现，正式部署与真机结果维护在 PROGRESS.md 和 TESTING.md。
 
 ```text
 robot-cloud/
 ├── robot/                机器狗端：doso-cloud-link
+├── ota/                  机器狗端：doso-ota 双通道/多组件 OTA Agent
+├── robot-authorizer/     机器狗端：doso-robot-authorizer 本地云开关授权服务
 ├── cloud/                云服务器端
-│   ├── gateway/          doso-cloud-gateway：状态查询、许可与业务同步
+│   ├── gateway/          doso-cloud-gateway：状态查询、许可、远控中继与业务同步
+│   ├── release/          doso-ota-release：OTA 发布中心、Ed25519 签名、OSS 签发与灰度熔断
 │   ├── broker/           Mosquitto：MQTT配置与主题ACL模板
 │   ├── media/            doso-cloud-media：视频信令与观看会话候选
 │   ├── telemetry/        doso-cloud-telemetry：已授权状态历史投递、ThingsBoard隔离部署
@@ -18,7 +23,8 @@ robot-cloud/
 ├── shared/               两端共用的协议、签名与状态定义
 ├── tools/                开发或运维时使用
 │   ├── lab/              本地模拟与通信联调
-│   └── deploy/           安装脚本、部署准备与历史记录
+│   ├── deploy/           安装脚本、OTA 运维 CLI、部署准备与历史记录
+│   └── ops-tunnel/       443 WSS 反向运维通道安装与现场激活工具
 ├── Cargo.toml            统一构建入口
 └── Cargo.lock            统一依赖锁定
 ```
@@ -84,6 +90,9 @@ cargo run --locked -p lab -- local
 
 | 文档 | 内容 |
 | --- | --- |
+| [docs/HANDOVER_OTA_AND_ROBOT_20261126.md](docs/HANDOVER_OTA_AND_ROBOT_20261126.md) | OTA 与机器狗项目交接手册（云/机/待办/运维命令） |
+| [docs/OTA_PRODUCTION_RUNBOOK.md](docs/OTA_PRODUCTION_RUNBOOK.md) | OTA 生产发布、灰度熔断与域名切流手册 |
+| [docs/OPS_TUNNEL_ACCEPTANCE_20261126.md](docs/OPS_TUNNEL_ACCEPTANCE_20261126.md) | 443 WSS 反向运维通道部署、验收与端口台账 |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 进程边界、状态真源、权限与生命周期 |
 | [CONTRACT.md](CONTRACT.md) | HTTP / MQTT 协议与签名格式 |
 | [PROGRESS.md](PROGRESS.md) | 当前完成程度、产品目标与下一阶段顺序 |
