@@ -15,6 +15,7 @@ SERVER_PY = CONSOLE_DIR / "server.py"
 ROBOT_OPS_PY = CONSOLE_DIR / "robot_ops.py"
 PROVISION_OPS_PY = CONSOLE_DIR / "provision_ops.py"
 FLEET_OPS_PY = CONSOLE_DIR / "fleet_ops.py"
+CLOUD_OPS_PY = CONSOLE_DIR / "cloud_ops.py"
 WEB_DIR = CONSOLE_DIR / "web"
 OPS_PY = REPO_ROOT / "tools" / "deploy" / "doso-ota-ops.py"
 DEFAULT_DIST = REPO_ROOT / "artifacts" / "ota-console"
@@ -84,12 +85,18 @@ def main() -> int:
             f"{PROVISION_OPS_PY}{sep}.",
             "--add-data",
             f"{FLEET_OPS_PY}{sep}.",
+            "--add-data",
+            f"{CLOUD_OPS_PY}{sep}.",
             "--hidden-import",
             "tkinter",
             "--hidden-import",
             "tkinter.filedialog",
             "--hidden-import",
             "paramiko",
+            "--hidden-import",
+            "xml.etree.ElementTree",
+            "--hidden-import",
+            "xml.parsers.expat",
             "--collect-submodules",
             "cryptography",
         ]

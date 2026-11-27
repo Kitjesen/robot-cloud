@@ -39,6 +39,7 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     ROBOT_OPS_PATH = _BUNDLE_ROOT / "robot_ops.py"
     PROVISION_OPS_PATH = _BUNDLE_ROOT / "provision_ops.py"
     FLEET_OPS_PATH = _BUNDLE_ROOT / "fleet_ops.py"
+    CLOUD_OPS_PATH = _BUNDLE_ROOT / "cloud_ops.py"
 else:
     CONSOLE_DIR = Path(__file__).resolve().parent
     WEB_DIR = CONSOLE_DIR / "web"
@@ -47,6 +48,7 @@ else:
     ROBOT_OPS_PATH = CONSOLE_DIR / "robot_ops.py"
     PROVISION_OPS_PATH = CONSOLE_DIR / "provision_ops.py"
     FLEET_OPS_PATH = CONSOLE_DIR / "fleet_ops.py"
+    CLOUD_OPS_PATH = CONSOLE_DIR / "cloud_ops.py"
 
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
@@ -125,6 +127,7 @@ robot_ops = load_module_from_path("doso_robot_ops", ROBOT_OPS_PATH)
 sys.modules["robot_ops"] = robot_ops
 provision_ops = load_module_from_path("doso_provision_ops", PROVISION_OPS_PATH)
 fleet_ops = load_module_from_path("doso_fleet_ops", FLEET_OPS_PATH)
+cloud_ops = load_module_from_path("doso_cloud_ops", CLOUD_OPS_PATH)
 
 
 def default_config_path() -> Path:
@@ -1230,6 +1233,122 @@ class ConsoleContext:
             "verifiedLatest": verified,
         }
 
+    def _collect_oss_key_guards(self, cfg: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+        """Collect OSS object keys referenced by live releases so prod/stable artifacts stay protected."""
+        protected: dict[str, str] = {}
+        referenced: dict[str, str] = {}
+        base_url = cfg.get("DOSO_OTA_CLOUD_URL", "").strip()
+        token = cfg.get("DOSO_RELEASE_API_TOKEN", "").strip()
+        if not base_url:
+            return protected, referenced
+
+        def _fetch(path: str, use_token: bool) -> Any:
+            try:
+                st, body = raw_http_json(base_url, "GET", path, token=token if use_token else None, timeout_s=6)
+                return body if st == 200 else None
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            f_rel = pool.submit(_fetch, "/v1/releases", True) if token else None
+            f_app = {
+                ch: pool.submit(
+                    _fetch,
+                    f"/v1/apps/android/latest?channel={urllib.parse.quote(ch)}&version_code=0",
+                    False,
+                )
+                for ch in ANDROID_CHANNELS
+            }
+            rels = f_rel.result() if f_rel else None
+            if isinstance(rels, list):
+                for r in rels:
+                    if not isinstance(r, dict):
+                        continue
+                    rid = str(r.get("releaseId") or "").strip()
+                    ch = str(r.get("channel") or "").strip()
+                    ver = str(r.get("version") or "").strip()
+                    if not rid or not ch:
+                        continue
+                    candidate_keys = [
+                        str(r.get("objectKey") or "").strip().lstrip("/"),
+                        f"firmware/{ch}/{rid}.tar.gz",
+                        f"rid:{rid}",
+                    ]
+                    for key in candidate_keys:
+                        if not key:
+                            continue
+                        referenced[key] = f"固件 {ch} v{ver}" if ver else f"固件 {ch}"
+                        if ch == "stable":
+                            protected[key] = "线上稳定版"
+
+            for ch, fut in f_app.items():
+                app_rel = fut.result()
+                if not isinstance(app_rel, dict):
+                    continue
+                obj_key = str(app_rel.get("objectKey") or "").strip().lstrip("/")
+                if not obj_key and app_rel.get("downloadUrl"):
+                    obj_key = urllib.parse.unquote(
+                        urllib.parse.urlparse(str(app_rel["downloadUrl"])).path
+                    ).lstrip("/")
+                ver_name = str(app_rel.get("versionName") or "").strip()
+                ver_code = app_rel.get("versionCode")
+                if not obj_key:
+                    continue
+                referenced[obj_key] = f"App {ch} v{ver_name} ({ver_code})" if ver_name else f"App {ch}"
+                if ch == "prod":
+                    protected[obj_key] = "线上正式版"
+
+        return protected, referenced
+
+    def list_oss_objects(self, prefix: str = "") -> dict[str, Any]:
+        cfg = self.config_store.effective()
+        protected, referenced = self._collect_oss_key_guards(cfg)
+        return cloud_ops.oss_list_objects(
+            cfg,
+            prefix=prefix,
+            protected_keys=protected,
+            referenced_keys=referenced,
+        )
+
+    def upload_oss_object(self, payload: dict[str, Any]) -> dict[str, Any]:
+        cfg = self.config_store.effective()
+        source_mode = str(payload.get("sourceMode") or "upload").strip()
+        overwrite = bool(payload.get("overwrite", False))
+        content_type = str(payload.get("contentType") or "").strip()
+
+        if source_mode == "upload":
+            upload_id = str(payload.get("uploadId") or "").strip()
+            local_path, orig_name = self.uploads.resolve_record(upload_id)
+        elif source_mode == "local_file":
+            local_path = Path(str(payload.get("localPath") or "").strip().strip('"').strip("'"))
+            if not local_path.is_file():
+                raise cloud_ops.CloudOpsError(f"本地文件不存在: {local_path}")
+            orig_name = local_path.name
+        else:
+            raise cloud_ops.CloudOpsError(f"不支持的文件来源: {source_mode}")
+
+        raw_key = str(payload.get("objectKey") or "").strip().lstrip("/")
+        if not raw_key:
+            prefix_dir = str(payload.get("prefixDir") or "files/").strip().lstrip("/")
+            if prefix_dir and not prefix_dir.endswith("/"):
+                prefix_dir += "/"
+            raw_key = f"{prefix_dir}{orig_name}"
+
+        return cloud_ops.oss_upload_file(
+            cfg,
+            ops,
+            local_path,
+            raw_key,
+            overwrite=overwrite,
+            content_type=content_type,
+        )
+
+    def delete_oss_object(self, payload: dict[str, Any]) -> dict[str, Any]:
+        cfg = self.config_store.effective()
+        object_key = str(payload.get("objectKey") or "").strip()
+        protected, _ = self._collect_oss_key_guards(cfg)
+        return cloud_ops.oss_delete_object(cfg, ops, object_key, protected_keys=protected)
+
 
 def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
     class OtaConsoleHandler(BaseHTTPRequestHandler):
@@ -1355,6 +1474,15 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     cfg = ctx.config_store.effective()
                     self._send_json(HTTPStatus.OK, fleet_ops.list_accounts(cfg))
                     return
+                if path == "/api/cloud/status":
+                    cfg = ctx.config_store.effective()
+                    self._send_json(HTTPStatus.OK, cloud_ops.get_cloud_server_status(cfg))
+                    return
+                if path == "/api/cloud/oss/list":
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    prefix = qs.get("prefix", [""])[0]
+                    self._send_json(HTTPStatus.OK, ctx.list_oss_objects(prefix))
+                    return
 
                 m_dev_rel = re.fullmatch(r"/api/devices/([^/]+)/releases", path)
                 if m_dev_rel:
@@ -1392,7 +1520,13 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     return
 
                 self._serve_static(path)
-            except (ops.OpsError, robot_ops.RobotOpsError, provision_ops.ProvisionError, fleet_ops.FleetOpsError) as exc:
+            except (
+                ops.OpsError,
+                robot_ops.RobotOpsError,
+                provision_ops.ProvisionError,
+                fleet_ops.FleetOpsError,
+                cloud_ops.CloudOpsError,
+            ) as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
@@ -1622,6 +1756,49 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     self._send_json(HTTPStatus.OK, res)
                     return
 
+                if path == "/api/cloud/service":
+                    cfg = ctx.config_store.effective()
+                    res = cloud_ops.control_cloud_service(
+                        cfg,
+                        str(body.get("kind") or ""),
+                        str(body.get("name") or ""),
+                        str(body.get("action") or ""),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/cloud/logs":
+                    cfg = ctx.config_store.effective()
+                    res = cloud_ops.get_cloud_service_logs(
+                        cfg,
+                        str(body.get("kind") or ""),
+                        str(body.get("name") or ""),
+                        int(body.get("lines") or 120),
+                        str(body.get("keyword") or ""),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/cloud/oss/upload":
+                    res = ctx.upload_oss_object(body)
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/cloud/oss/presign":
+                    cfg = ctx.config_store.effective()
+                    res = cloud_ops.oss_presign_get_url(
+                        cfg,
+                        str(body.get("objectKey") or ""),
+                        int(body.get("ttlSeconds") or 1800),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/cloud/oss/delete":
+                    res = ctx.delete_oss_object(body)
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
                 if path == "/api/devices/owner":
                     cfg = ctx.config_store.effective()
                     res = fleet_ops.update_device_owner(
@@ -1815,7 +1992,13 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     return
 
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown_api"})
-            except (ops.OpsError, robot_ops.RobotOpsError, provision_ops.ProvisionError, fleet_ops.FleetOpsError) as exc:
+            except (
+                ops.OpsError,
+                robot_ops.RobotOpsError,
+                provision_ops.ProvisionError,
+                fleet_ops.FleetOpsError,
+                cloud_ops.CloudOpsError,
+            ) as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except ValueError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})

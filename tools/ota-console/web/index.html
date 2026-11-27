@@ -38,6 +38,11 @@
 
         <div class="nav-divider"></div>
 
+        <button class="nav-item" data-view="cloud" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+          <span>云端与 OSS</span>
+        </button>
+
         <button class="nav-item" data-view="accounts" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span>账号权限</span>
@@ -475,6 +480,173 @@
               <button class="btn btn-primary btn-sm" id="btn-ops-logs" type="button">拉取日志</button>
             </div>
             <pre class="log-box" id="ops-log-output">点击「拉取日志」查看实时输出</pre>
+          </div>
+        </section>
+
+        <!-- View 5B: Cloud Server & OSS Management -->
+        <section class="view" id="view-cloud">
+          <div class="hub-tabs" id="cloud-subtabs">
+            <button type="button" class="hub-tab active" data-cloud-tab="server">云服务器</button>
+            <button type="button" class="hub-tab" data-cloud-tab="oss">OSS 存储 <span class="tab-pill" id="tab-count-oss">0</span></button>
+          </div>
+
+          <!-- Cloud Tab 1: Server Status & Services -->
+          <div class="cloud-pane active" id="cloud-pane-server">
+            <div class="metrics">
+              <div class="metric">
+                <div class="metric-label">主机负载</div>
+                <div class="metric-value metric-value-sm" id="cloud-st-load">—</div>
+                <div class="sub-line" id="cloud-st-load-sub">点击刷新体检</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">内存占用</div>
+                <div class="metric-value metric-value-sm" id="cloud-st-mem">—</div>
+                <div class="sub-line" id="cloud-st-mem-sub">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">根磁盘</div>
+                <div class="metric-value metric-value-sm" id="cloud-st-disk">—</div>
+                <div class="sub-line" id="cloud-st-disk-sub">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">公网探针</div>
+                <div class="metric-value metric-value-sm" id="cloud-st-probes">—</div>
+                <div class="sub-line" id="cloud-st-probes-sub">—</div>
+              </div>
+            </div>
+
+            <div class="section-block">
+              <div class="section-head">
+                <h2>公网链路</h2>
+                <div class="section-actions">
+                  <span class="sub-line" id="cloud-host-meta"></span>
+                  <button class="btn btn-ghost btn-sm" id="btn-cloud-refresh" type="button">刷新体检</button>
+                </div>
+              </div>
+              <div class="cloud-probe-grid" id="cloud-probes-grid">
+                <div class="probe-card"><span class="sub-line">加载中…</span></div>
+              </div>
+            </div>
+
+            <div class="section-block">
+              <div class="section-head">
+                <h2>核心服务</h2>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>服务</th>
+                      <th>类型</th>
+                      <th>运行状态</th>
+                      <th class="col-actions">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cloud-services-tbody">
+                    <tr><td colspan="4" class="empty-cell">加载中…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cloud Tab 2: Private OSS Storage -->
+          <div class="cloud-pane" id="cloud-pane-oss">
+            <div class="metrics">
+              <div class="metric">
+                <div class="metric-label">对象总数</div>
+                <div class="metric-value" id="oss-stat-count">0</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">总占用空间</div>
+                <div class="metric-value metric-value-sm" id="oss-stat-size">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">固件包</div>
+                <div class="metric-value metric-value-sm" id="oss-stat-fw">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">App 与文件</div>
+                <div class="metric-value metric-value-sm" id="oss-stat-other">—</div>
+              </div>
+            </div>
+
+            <div class="section-block" id="oss-upload-card">
+              <div class="section-head">
+                <h2>上传文件</h2>
+                <span class="sub-line mono" id="oss-bucket-meta"></span>
+              </div>
+              <form class="form-panel oss-upload-form" id="oss-upload-form">
+                <div class="dropzone" id="oss-dropzone">
+                  <input type="file" id="oss-file-input" hidden />
+                  <div class="dropzone-main">
+                    <span id="oss-file-label">拖拽文件到此处，或点击选择</span>
+                    <div class="dropzone-btns">
+                      <button class="btn btn-sm btn-ghost" id="btn-oss-select" type="button">选择文件</button>
+                      <button class="btn btn-sm btn-ghost" id="btn-oss-pick" type="button">本机浏览</button>
+                    </div>
+                  </div>
+                  <div class="dropzone-meta" id="oss-file-meta"></div>
+                </div>
+
+                <div class="oss-upload-controls">
+                  <div class="field">
+                    <label for="oss-prefix-dir">目标目录</label>
+                    <select id="oss-prefix-dir">
+                      <option value="files/">通用文件 (files/)</option>
+                      <option value="firmware/qa/">测试固件 (firmware/qa/)</option>
+                      <option value="firmware/dev/">开发固件 (firmware/dev/)</option>
+                      <option value="apps/android/qa/">测试安装包 (apps/android/qa/)</option>
+                    </select>
+                  </div>
+                  <div class="field" style="flex:1;min-width:220px;">
+                    <label for="oss-object-key">对象路径</label>
+                    <input id="oss-object-key" type="text" class="mono" placeholder="选择文件后自动填充" />
+                  </div>
+                  <label class="checkbox-label oss-overwrite-opt">
+                    <input id="oss-overwrite" type="checkbox" />
+                    <span>覆盖同名</span>
+                  </label>
+                  <button class="btn btn-primary" id="btn-oss-submit" type="submit">立即上传</button>
+                </div>
+                <div class="step-result hidden" id="oss-upload-result"></div>
+              </form>
+            </div>
+
+            <div class="section-block">
+              <div class="section-head">
+                <h2>存储对象</h2>
+                <div class="section-actions">
+                  <input class="search-input" id="oss-search" type="search" placeholder="搜索文件名或路径" />
+                  <button class="btn btn-ghost btn-sm" id="btn-oss-refresh" type="button">刷新列表</button>
+                </div>
+              </div>
+              <div class="filter-bar">
+                <div class="filter-pills" id="oss-filter-chips">
+                  <button type="button" class="filter-pill active" data-oss-filter="all">全部</button>
+                  <button type="button" class="filter-pill" data-oss-filter="firmware">固件包</button>
+                  <button type="button" class="filter-pill" data-oss-filter="apps">App 安装包</button>
+                  <button type="button" class="filter-pill" data-oss-filter="files">通用文件</button>
+                  <button type="button" class="filter-pill" data-oss-filter="protected">线上在用</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>对象路径</th>
+                      <th>分类</th>
+                      <th>大小</th>
+                      <th>更新时间</th>
+                      <th class="col-actions">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="oss-objects-tbody">
+                    <tr><td colspan="5" class="empty-cell">加载中…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -1109,6 +1281,30 @@
           <button class="btn btn-primary" type="submit">创建灰度</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Slide-over Drawer: Cloud Service Logs -->
+  <div class="drawer-backdrop hidden" id="drawer-cloud-logs">
+    <div class="drawer drawer-wide" role="dialog" aria-modal="true" aria-labelledby="cloud-log-title">
+      <div class="drawer-head">
+        <h2 id="cloud-log-title">服务日志</h2>
+        <button class="icon-btn" data-close-drawer="drawer-cloud-logs" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="drawer-body" style="display:flex;flex-direction:column;gap:12px;">
+        <div class="file-toolbar" style="margin-bottom:0;">
+          <select id="cloud-log-lines" style="width:100px;">
+            <option value="120">120 行</option>
+            <option value="250">250 行</option>
+            <option value="500">500 行</option>
+          </select>
+          <input id="cloud-log-keyword" type="search" placeholder="筛选关键字" style="flex:1;" />
+          <button class="btn btn-primary btn-sm" id="btn-cloud-log-reload" type="button">拉取日志</button>
+        </div>
+        <pre class="log-box" id="cloud-log-output" style="flex:1;max-height:none;">正在读取日志…</pre>
+      </div>
     </div>
   </div>
 

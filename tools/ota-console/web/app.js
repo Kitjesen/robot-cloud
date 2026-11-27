@@ -24,6 +24,18 @@
     detailDeviceId: null,
     accountsLoaded: false,
     accounts: [],
+    cloudTab: "server",
+    cloudLoaded: false,
+    cloudStatus: null,
+    cloudLogTarget: null,
+    ossLoaded: false,
+    ossData: null,
+    ossFilter: "all",
+    ossSourceMode: "upload",
+    ossUpload: null,
+    ossLocalPath: "",
+    ossSelectedName: "",
+    ossKeyTouched: false,
   };
 
   const VIEW_META = {
@@ -33,6 +45,7 @@
     rollouts: { title: "版本发版", cta: "新建灰度" },
     android: { title: "版本发版", cta: null },
     ops: { title: "机载运维", cta: null },
+    cloud: { title: "云端与 OSS", cta: "上传文件" },
     accounts: { title: "账号权限", cta: null },
     settings: { title: "系统配置", cta: null },
   };
@@ -226,6 +239,13 @@
     }
     if (viewName === "accounts" && !STATE.accountsLoaded) {
       loadAccounts(true);
+    }
+    if (viewName === "cloud") {
+      if (STATE.cloudTab === "server" && !STATE.cloudLoaded) {
+        loadCloudServerStatus(true);
+      } else if (STATE.cloudTab === "oss" && !STATE.ossLoaded) {
+        loadOssObjects(true);
+      }
     }
   }
 
@@ -1464,6 +1484,269 @@
     }
   }
 
+  // ---------- Cloud Server & Private OSS Management ----------
+  const OSS_CAT_LABELS = {
+    firmware: { label: "固件", cls: "badge-info" },
+    apps: { label: "App", cls: "badge-ok" },
+    files: { label: "文件", cls: "badge-neutral" },
+  };
+
+  async function copyTextSafe(text, okMsg) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(okMsg, "ok");
+    } catch {
+      window.prompt("请复制以下链接", text);
+    }
+  }
+
+  function setCloudTab(tab) {
+    STATE.cloudTab = tab === "oss" ? "oss" : "server";
+    document.querySelectorAll("#cloud-subtabs .hub-tab").forEach((b) => {
+      b.classList.toggle("active", b.dataset.cloudTab === STATE.cloudTab);
+    });
+    $("cloud-pane-server").classList.toggle("active", STATE.cloudTab === "server");
+    $("cloud-pane-oss").classList.toggle("active", STATE.cloudTab === "oss");
+    if (STATE.cloudTab === "server" && !STATE.cloudLoaded) {
+      loadCloudServerStatus(true);
+    } else if (STATE.cloudTab === "oss" && !STATE.ossLoaded) {
+      loadOssObjects(true);
+    }
+  }
+
+  function renderCloudServerStatus(data) {
+    if (!data) return;
+    const host = data.host || {};
+    const probes = data.probes || [];
+    const okProbes = probes.filter((p) => p.ok).length;
+
+    if (data.sshOk) {
+      $("cloud-st-load").textContent = Number(host.load1 || 0).toFixed(2);
+      $("cloud-st-load-sub").textContent = `${host.cpuCores || 0} 核 · ${host.uptime || "在线"}`;
+      $("cloud-st-mem").textContent = `${host.memPercent ?? 0}%`;
+      $("cloud-st-mem-sub").textContent = `${formatBytes(host.memUsedBytes)} / ${formatBytes(host.memTotalBytes)}`;
+      $("cloud-st-disk").textContent = `${host.diskPercent ?? 0}%`;
+      $("cloud-st-disk-sub").textContent = `可用 ${formatBytes(host.diskAvailBytes)}`;
+      $("cloud-host-meta").textContent = `${host.hostname || host.address || ""} · ${formatTime(data.checkedAtMs)}`;
+    } else {
+      $("cloud-st-load").textContent = "未连接";
+      $("cloud-st-load-sub").textContent = data.sshError || "请检查系统配置中的跳板密钥";
+      $("cloud-st-mem").textContent = "—";
+      $("cloud-st-mem-sub").textContent = "—";
+      $("cloud-st-disk").textContent = "—";
+      $("cloud-st-disk-sub").textContent = "—";
+      $("cloud-host-meta").textContent = host.address || "";
+    }
+
+    $("cloud-st-probes").textContent = `${okProbes} / ${probes.length}`;
+    $("cloud-st-probes").classList.toggle("metric-value-err", okProbes < probes.length);
+    $("cloud-st-probes-sub").textContent = okProbes === probes.length ? "公网正常" : "存在异常";
+
+    $("cloud-probes-grid").innerHTML = probes.length
+      ? probes
+          .map(
+            (p) => `
+            <div class="probe-card">
+              <div>
+                <div class="probe-title">${esc(p.label)}</div>
+                <div class="sub-line mono">${esc(p.detail || "")}${p.latencyMs != null ? ` · ${p.latencyMs} ms` : ""}</div>
+              </div>
+              <span class="badge ${p.ok ? "badge-ok" : "badge-err"}">${p.ok ? "正常" : "异常"}</span>
+            </div>`
+          )
+          .join("")
+      : `<div class="probe-card"><span class="sub-line">暂无探针数据</span></div>`;
+
+    const tbody = $("cloud-services-tbody");
+    const rows = [
+      ...(data.systemd || []).map((s) => ({
+        kind: "systemd",
+        kindLabel: "系统",
+        name: s.name,
+        label: s.label,
+        healthy: s.healthy,
+        stateText: s.activeState === "active" ? "运行中" : s.activeState || "未知",
+        subText: s.subState || "",
+        actions: s.allowedActions || [],
+      })),
+      ...(data.docker || []).map((c) => ({
+        kind: "docker",
+        kindLabel: "容器",
+        name: c.name,
+        label: c.label,
+        healthy: c.healthy,
+        stateText: c.healthy ? "运行中" : c.state || "异常",
+        subText: c.status || "",
+        actions: c.allowedActions || [],
+      })),
+    ];
+
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">${esc(data.sshError || "未获取到云端服务状态")}</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = rows
+      .map((r) => {
+        const actionBtns = r.actions
+          .map((act) => {
+            const label = act === "reload" ? "重载" : "重启";
+            return `<button class="btn btn-sm btn-ghost" data-cloud-svc-kind="${esc(r.kind)}" data-cloud-svc-name="${esc(
+              r.name
+            )}" data-cloud-svc-act="${esc(act)}" type="button">${label}</button>`;
+          })
+          .join("");
+        const guardTag = r.actions.length ? "" : `<span class="badge badge-neutral">受保护</span>`;
+        return `
+          <tr>
+            <td>
+              <div><strong>${esc(r.label)}</strong></div>
+              <div class="sub-line mono">${esc(r.name)}</div>
+            </td>
+            <td><span class="badge badge-neutral">${r.kindLabel}</span></td>
+            <td>
+              <span class="badge ${r.healthy ? "badge-ok" : "badge-err"}">${esc(r.stateText)}</span>
+              ${r.subText ? `<div class="sub-line">${esc(r.subText)}</div>` : ""}
+            </td>
+            <td class="col-actions">
+              ${guardTag}
+              ${actionBtns}
+              <button class="btn btn-sm btn-ghost" data-cloud-log-kind="${esc(r.kind)}" data-cloud-log-name="${esc(
+          r.name
+        )}" data-cloud-log-label="${esc(r.label)}" type="button">日志</button>
+            </td>
+          </tr>`;
+      })
+      .join("");
+  }
+
+  async function loadCloudServerStatus(silent = false) {
+    const btn = $("btn-cloud-refresh");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "体检中…";
+    }
+    try {
+      const data = await apiFetch("/api/cloud/status");
+      STATE.cloudStatus = data;
+      STATE.cloudLoaded = true;
+      renderCloudServerStatus(data);
+      if (!silent) toast("云端体检已更新", "ok");
+    } catch (err) {
+      if (!silent) toast(err.message, "err");
+      $("cloud-services-tbody").innerHTML = `<tr><td colspan="4" class="empty-cell">${esc(err.message)}</td></tr>`;
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "刷新体检";
+      }
+    }
+  }
+
+  async function reloadCloudLogs() {
+    const target = STATE.cloudLogTarget;
+    if (!target) return;
+    const box = $("cloud-log-output");
+    box.textContent = "正在拉取日志…";
+    try {
+      const res = await apiFetch("/api/cloud/logs", {
+        json: {
+          kind: target.kind,
+          name: target.name,
+          lines: Number($("cloud-log-lines").value || 120),
+          keyword: $("cloud-log-keyword").value.trim(),
+        },
+      });
+      box.textContent = res.text || "无匹配日志";
+      box.scrollTop = box.scrollHeight;
+    } catch (err) {
+      box.textContent = err.message;
+      toast(err.message, "err");
+    }
+  }
+
+  function syncOssAutoKey() {
+    if (STATE.ossKeyTouched || !STATE.ossSelectedName) return;
+    const dir = $("oss-prefix-dir").value || "files/";
+    $("oss-object-key").value = `${dir}${STATE.ossSelectedName}`;
+  }
+
+  function renderOssObjects() {
+    const data = STATE.ossData;
+    if (!data) return;
+    const objects = data.objects || [];
+    const byCat = data.byCategory || {};
+    const fw = byCat.firmware || { count: 0, sizeBytes: 0 };
+    const apps = byCat.apps || { count: 0, sizeBytes: 0 };
+    const files = byCat.files || { count: 0, sizeBytes: 0 };
+
+    $("oss-stat-count").textContent = String(data.totalCount || 0);
+    $("oss-stat-size").textContent = formatBytes(data.totalSizeBytes || 0);
+    $("oss-stat-fw").textContent = `${fw.count} 个 · ${formatBytes(fw.sizeBytes)}`;
+    $("oss-stat-other").textContent = `${apps.count + files.count} 个 · ${formatBytes(apps.sizeBytes + files.sizeBytes)}`;
+    $("oss-bucket-meta").textContent = `${data.bucket || ""}${data.endpoint ? ` · ${data.endpoint}` : ""}`;
+    if ($("tab-count-oss")) $("tab-count-oss").textContent = String(data.totalCount || 0);
+
+    const q = ($("oss-search").value || "").trim().toLowerCase();
+    const filtered = objects.filter((obj) => {
+      if (STATE.ossFilter === "protected" && !obj.protected) return false;
+      if (STATE.ossFilter !== "all" && STATE.ossFilter !== "protected" && obj.category !== STATE.ossFilter) return false;
+      if (!q) return true;
+      return (
+        String(obj.key || "").toLowerCase().includes(q) ||
+        String(obj.releaseTag || "").toLowerCase().includes(q)
+      );
+    });
+
+    const tbody = $("oss-objects-tbody");
+    if (!filtered.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty-cell">暂无匹配对象</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtered
+      .map((obj) => {
+        const cat = OSS_CAT_LABELS[obj.category] || OSS_CAT_LABELS.files;
+        const ts = obj.lastModified ? formatTime(Date.parse(obj.lastModified)) : "—";
+        const tagHtml = obj.releaseTag ? ` <span class="badge badge-neutral">${esc(obj.releaseTag)}</span>` : "";
+        const protHtml = obj.protected
+          ? `<span class="badge badge-ok" title="${esc(obj.protectReason || "线上在用")}">线上在用</span>`
+          : `<button class="btn btn-sm btn-danger" data-oss-del="${esc(obj.key)}" type="button">删除</button>`;
+        return `
+          <tr>
+            <td>
+              <div><strong class="mono">${esc(obj.name)}</strong>${tagHtml}</div>
+              <div class="sub-line mono">${esc(obj.key)}</div>
+            </td>
+            <td><span class="badge ${cat.cls}">${cat.label}</span></td>
+            <td class="mono">${formatBytes(obj.sizeBytes)}</td>
+            <td class="sub-line">${esc(ts)}</td>
+            <td class="col-actions">
+              <button class="btn btn-sm btn-ghost" data-oss-sign="${esc(obj.key)}" type="button">复制链接</button>
+              ${protHtml}
+            </td>
+          </tr>`;
+      })
+      .join("");
+  }
+
+  async function loadOssObjects(silent = false) {
+    const btn = $("btn-oss-refresh");
+    if (btn) btn.disabled = true;
+    try {
+      const data = await apiFetch("/api/cloud/oss/list");
+      STATE.ossData = data;
+      STATE.ossLoaded = true;
+      renderOssObjects();
+      if (!silent) toast(`已加载 ${data.totalCount} 个存储对象`, "ok");
+    } catch (err) {
+      if (!silent) toast(err.message, "err");
+      $("oss-objects-tbody").innerHTML = `<tr><td colspan="5" class="empty-cell">${esc(err.message)}</td></tr>`;
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   function setupDropzone(zoneId, fileInputId, onFile) {
     const zone = $(zoneId);
     const input = $(fileInputId);
@@ -1498,11 +1781,22 @@
     $("mobile-menu-btn").addEventListener("click", () => $("sidebar").classList.toggle("open"));
     $("conn-pill").addEventListener("click", () => setView("settings"));
     $("btn-goto-settings").addEventListener("click", () => setView("settings"));
-    $("btn-refresh").addEventListener("click", () => refreshAll(false, true));
+    $("btn-refresh").addEventListener("click", () => {
+      if (STATE.view === "cloud") {
+        if (STATE.cloudTab === "oss") loadOssObjects(false);
+        else loadCloudServerStatus(false);
+        return;
+      }
+      refreshAll(false, true);
+    });
 
     $("btn-primary-cta").addEventListener("click", () => {
       if (STATE.view === "rollouts") {
         openRolloutDrawer();
+      } else if (STATE.view === "cloud") {
+        setCloudTab("oss");
+        $("oss-upload-card")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        $("oss-file-input")?.click();
       } else {
         suggestNextReleaseMeta();
         $("robot-publish-result").classList.add("hidden");
@@ -1917,6 +2211,204 @@
 
     // Accounts RBAC View Events
     $("btn-reload-accounts").addEventListener("click", () => loadAccounts(false));
+
+    // Cloud Server & Private OSS Events
+    document.querySelectorAll("#cloud-subtabs .hub-tab").forEach((b) => {
+      b.addEventListener("click", () => setCloudTab(b.dataset.cloudTab));
+    });
+    $("btn-cloud-refresh").addEventListener("click", () => loadCloudServerStatus(false));
+
+    $("cloud-services-tbody").addEventListener("click", async (e) => {
+      const logBtn = e.target.closest("[data-cloud-log-name]");
+      if (logBtn) {
+        STATE.cloudLogTarget = {
+          kind: logBtn.dataset.cloudLogKind,
+          name: logBtn.dataset.cloudLogName,
+          label: logBtn.dataset.cloudLogLabel || logBtn.dataset.cloudLogName,
+        };
+        $("cloud-log-title").textContent = `${STATE.cloudLogTarget.label} 日志`;
+        $("cloud-log-keyword").value = "";
+        openDrawer("drawer-cloud-logs");
+        reloadCloudLogs();
+        return;
+      }
+      const svcBtn = e.target.closest("[data-cloud-svc-name]");
+      if (!svcBtn) return;
+      const kind = svcBtn.dataset.cloudSvcKind;
+      const name = svcBtn.dataset.cloudSvcName;
+      const action = svcBtn.dataset.cloudSvcAct;
+      const actLabel = action === "reload" ? "重载" : "重启";
+      if (!window.confirm(`确认${actLabel}云端服务 ${name}？`)) return;
+      svcBtn.disabled = true;
+      try {
+        const res = await apiFetch("/api/cloud/service", { json: { kind, name, action } });
+        toast(`${name} 已${actLabel} (${res.state})`, "ok");
+        await loadCloudServerStatus(true);
+      } catch (err) {
+        toast(err.message, "err");
+        svcBtn.disabled = false;
+      }
+    });
+
+    $("btn-cloud-log-reload").addEventListener("click", () => reloadCloudLogs());
+    $("cloud-log-keyword").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        reloadCloudLogs();
+      }
+    });
+
+    // OSS Storage Events
+    $("btn-oss-refresh").addEventListener("click", () => loadOssObjects(false));
+    $("oss-search").addEventListener("input", () => renderOssObjects());
+    document.querySelectorAll("#oss-filter-chips .filter-pill").forEach((b) => {
+      b.addEventListener("click", () => {
+        STATE.ossFilter = b.dataset.ossFilter;
+        document.querySelectorAll("#oss-filter-chips .filter-pill").forEach((p) => {
+          p.classList.toggle("active", p.dataset.ossFilter === STATE.ossFilter);
+        });
+        renderOssObjects();
+      });
+    });
+
+    $("btn-oss-select").addEventListener("click", () => $("oss-file-input").click());
+    setupDropzone("oss-dropzone", "oss-file-input", async (file) => {
+      try {
+        const rec = await uploadRawFile(file, $("oss-file-meta"));
+        STATE.ossSourceMode = "upload";
+        STATE.ossUpload = rec;
+        STATE.ossLocalPath = "";
+        STATE.ossSelectedName = rec.filename;
+        STATE.ossKeyTouched = false;
+        $("oss-file-label").textContent = rec.filename;
+        $("oss-file-meta").textContent = `${formatBytes(rec.sizeBytes)} · SHA-256 ${rec.sha256.slice(0, 12)}`;
+        syncOssAutoKey();
+      } catch (err) {
+        $("oss-file-meta").textContent = err.message;
+        toast(err.message, "err");
+      }
+    });
+
+    $("btn-oss-pick").addEventListener("click", async () => {
+      try {
+        const res = await apiFetch("/api/pick-path", { json: { kind: "file" } });
+        if (!res.supported) {
+          toast("当前环境不支持本机弹窗，请直接拖入文件", "err");
+          return;
+        }
+        if (res.path) {
+          const info = await apiFetch("/api/inspect-path", { json: { path: res.path } });
+          if (!info.exists || info.isDir) return;
+          STATE.ossSourceMode = "local_file";
+          STATE.ossLocalPath = info.path;
+          STATE.ossUpload = null;
+          STATE.ossSelectedName = info.name;
+          STATE.ossKeyTouched = false;
+          $("oss-file-label").textContent = info.name;
+          $("oss-file-meta").textContent = `${formatBytes(info.sizeBytes)} · SHA-256 ${info.sha256.slice(0, 12)}`;
+          syncOssAutoKey();
+        }
+      } catch (err) {
+        toast(err.message, "err");
+      }
+    });
+
+    $("oss-prefix-dir").addEventListener("change", () => syncOssAutoKey());
+    $("oss-object-key").addEventListener("input", () => {
+      STATE.ossKeyTouched = Boolean($("oss-object-key").value.trim());
+    });
+
+    $("oss-upload-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (STATE.ossSourceMode === "upload" && !STATE.ossUpload?.uploadId) {
+        toast("请先选择或拖入要上传的文件", "err");
+        return;
+      }
+      if (STATE.ossSourceMode === "local_file" && !STATE.ossLocalPath) {
+        toast("请先选择要上传的文件", "err");
+        return;
+      }
+      const btn = $("btn-oss-submit");
+      const resultBox = $("oss-upload-result");
+      btn.disabled = true;
+      btn.textContent = "上传中…";
+      try {
+        const res = await apiFetch("/api/cloud/oss/upload", {
+          json: {
+            sourceMode: STATE.ossSourceMode,
+            uploadId: STATE.ossUpload?.uploadId || "",
+            localPath: STATE.ossLocalPath || "",
+            prefixDir: $("oss-prefix-dir").value,
+            objectKey: $("oss-object-key").value.trim(),
+            overwrite: $("oss-overwrite").checked,
+          },
+        });
+        resultBox.innerHTML = `
+          <div class="oss-result-row">
+            <div>
+              <span class="badge badge-ok">上传完成</span>
+              <strong class="mono" style="margin-left:6px;">${esc(res.objectKey)}</strong>
+              <span class="sub-line" style="margin-left:8px;">${formatBytes(res.sizeBytes)} · SHA-256 ${esc(
+                String(res.sha256 || "").slice(0, 12)
+              )}</span>
+            </div>
+            <button class="btn btn-sm btn-ghost" data-copy-signed="${esc(res.signedUrl || "")}" type="button">复制临时链接</button>
+          </div>`;
+        resultBox.classList.remove("hidden");
+        STATE.ossUpload = null;
+        STATE.ossLocalPath = "";
+        STATE.ossSelectedName = "";
+        STATE.ossKeyTouched = false;
+        $("oss-file-label").textContent = "拖拽文件到此处，或点击选择";
+        $("oss-file-meta").textContent = "";
+        $("oss-object-key").value = "";
+        toast(`已上传至 ${res.objectKey}`, "ok");
+        await loadOssObjects(true);
+      } catch (err) {
+        toast(err.message, "err");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "立即上传";
+      }
+    });
+
+    $("oss-upload-result").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-copy-signed]");
+      if (btn && btn.dataset.copySigned) {
+        copyTextSafe(btn.dataset.copySigned, "已复制 30 分钟临时下载链接");
+      }
+    });
+
+    $("oss-objects-tbody").addEventListener("click", async (e) => {
+      const signBtn = e.target.closest("[data-oss-sign]");
+      if (signBtn) {
+        const key = signBtn.dataset.ossSign;
+        signBtn.disabled = true;
+        try {
+          const res = await apiFetch("/api/cloud/oss/presign", { json: { objectKey: key, ttlSeconds: 1800 } });
+          await copyTextSafe(res.url, "已复制 30 分钟临时下载链接");
+        } catch (err) {
+          toast(err.message, "err");
+        } finally {
+          signBtn.disabled = false;
+        }
+        return;
+      }
+      const delBtn = e.target.closest("[data-oss-del]");
+      if (delBtn) {
+        const key = delBtn.dataset.ossDel;
+        if (!window.confirm(`确认删除 OSS 对象 ${key}？此操作不可恢复。`)) return;
+        delBtn.disabled = true;
+        try {
+          await apiFetch("/api/cloud/oss/delete", { json: { objectKey: key } });
+          toast(`已删除 ${key}`, "ok");
+          await loadOssObjects(true);
+        } catch (err) {
+          toast(err.message, "err");
+          delBtn.disabled = false;
+        }
+      }
+    });
     $("accounts-tbody").addEventListener("click", async (e) => {
       const btn = e.target.closest("[data-save-role]");
       if (!btn) return;

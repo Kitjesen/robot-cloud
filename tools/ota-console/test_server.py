@@ -780,6 +780,153 @@ class OtaConsoleTests(unittest.TestCase):
             self.assertEqual(st_acc, 200)
             self.assertEqual(acc["accounts"][0]["email"], "995632531@qq.com")
 
+    def test_cloud_ops_allowlists_and_oss_routes(self) -> None:
+        self._configure_console()
+        co = console.cloud_ops
+
+        # Allowlist enforcement: permitted targets pass, critical targets rejected
+        self.assertEqual(
+            co.validate_cloud_service_action("systemd", "doso-ota-release.service", "restart"),
+            ("systemd", "doso-ota-release.service", "restart"),
+        )
+        self.assertEqual(
+            co.validate_cloud_service_action("systemd", "nginx.service", "reload"),
+            ("systemd", "nginx.service", "reload"),
+        )
+        self.assertEqual(
+            co.validate_cloud_service_action("docker", "supabase-edge-functions", "restart"),
+            ("docker", "supabase-edge-functions", "restart"),
+        )
+        with self.assertRaises(co.CloudOpsError):
+            co.validate_cloud_service_action("docker", "supabase-db", "restart")
+        with self.assertRaises(co.CloudOpsError):
+            co.validate_cloud_service_action("systemd", "sshd.service", "restart")
+        with self.assertRaises(co.CloudOpsError):
+            co.validate_cloud_service_action("systemd", "nginx.service", "stop")
+
+        # HTTP route rejects restarting supabase-db with 400
+        st_bad, bad = self._req(
+            "POST",
+            "/api/cloud/service",
+            body={"kind": "docker", "name": "supabase-db", "action": "restart"},
+        )
+        self.assertEqual(st_bad, 400)
+        self.assertIn("安全保护", bad["error"])
+
+        # OSS key validation & XML parser
+        self.assertEqual(co.validate_oss_key("/files/demo.bin"), "files/demo.bin")
+        with self.assertRaises(co.CloudOpsError):
+            co.validate_oss_key("../etc/passwd")
+        with self.assertRaises(co.CloudOpsError):
+            co.validate_oss_key("files\\bad.bin")
+
+        sample_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <ListBucketResult xmlns="http://doc.s3.amazonaws.com/2006-03-01">
+          <IsTruncated>false</IsTruncated>
+          <Contents>
+            <Key>firmware/stable/brainstem-1.0.0.tar.gz</Key>
+            <LastModified>2026-11-28T01:00:00.000Z</LastModified>
+            <ETag>"abc123"</ETag>
+            <Size>4096</Size>
+            <StorageClass>Standard</StorageClass>
+          </Contents>
+          <Contents>
+            <Key>apps/android/prod/doso-prod-0.2.0-57.apk</Key>
+            <LastModified>2026-11-28T02:00:00.000Z</LastModified>
+            <ETag>"def456"</ETag>
+            <Size>1048576</Size>
+            <StorageClass>Standard</StorageClass>
+          </Contents>
+          <Contents>
+            <Key>files/temp-qa.txt</Key>
+            <LastModified>2026-11-27T12:00:00.000Z</LastModified>
+            <ETag>"ghi789"</ETag>
+            <Size>32</Size>
+            <StorageClass>Standard</StorageClass>
+          </Contents>
+        </ListBucketResult>"""
+        parsed_items, trunc, tok = co.parse_oss_list_xml(sample_xml)
+        self.assertFalse(trunc)
+        self.assertEqual(tok, "")
+        self.assertEqual(len(parsed_items), 3)
+
+        # Register a prod Android release in mock cloud so it's protected
+        self.cloud_state.android["prod"] = {
+            "channel": "prod",
+            "versionName": "0.2.0",
+            "versionCode": 57,
+            "objectKey": "apps/android/prod/doso-prod-0.2.0-57.apk",
+            "apkSha256": "0" * 64,
+            "apkSizeBytes": 1048576,
+        }
+
+        with mock.patch.object(co, "_oss_list_page", return_value=(parsed_items, False, "")):
+            st_list, listed = self._req("GET", "/api/cloud/oss/list")
+            self.assertEqual(st_list, 200)
+            self.assertEqual(listed["totalCount"], 3)
+            by_key = {o["key"]: o for o in listed["objects"]}
+            self.assertTrue(by_key["firmware/stable/brainstem-1.0.0.tar.gz"]["protected"])
+            self.assertTrue(by_key["apps/android/prod/doso-prod-0.2.0-57.apk"]["protected"])
+            self.assertFalse(by_key["files/temp-qa.txt"]["protected"])
+
+        # Presigned URL route works cleanly and never leaks secret
+        st_sig, sig = self._req(
+            "POST",
+            "/api/cloud/oss/presign",
+            body={"objectKey": "files/temp-qa.txt", "ttlSeconds": 900},
+        )
+        self.assertEqual(st_sig, 200)
+        self.assertIn("https://test-bucket.oss-cn-shanghai.aliyuncs.com/files/temp-qa.txt?", sig["url"])
+        self.assertIn("Signature=", sig["url"])
+        self.assertNotIn("SuperSecretOssKey987654321", sig["url"])
+
+        # Protected prod APK & stable firmware delete MUST be blocked
+        st_del_prot, del_prot = self._req(
+            "POST",
+            "/api/cloud/oss/delete",
+            body={"objectKey": "apps/android/prod/doso-prod-0.2.0-57.apk"},
+        )
+        self.assertEqual(st_del_prot, 400)
+        self.assertIn("受保护", del_prot["error"])
+
+        st_del_stab, _ = self._req(
+            "POST",
+            "/api/cloud/oss/delete",
+            body={"objectKey": "firmware/stable/brainstem-1.0.0.tar.gz"},
+        )
+        self.assertEqual(st_del_stab, 400)
+
+        # Unprotected file upload via /api/uploads -> /api/cloud/oss/upload & delete
+        st_up_raw, up_rec = self._req(
+            "POST",
+            "/api/uploads",
+            raw_bytes=b"hello-oss-console",
+            headers={"X-Upload-Filename": "note.txt"},
+        )
+        self.assertEqual(st_up_raw, 201)
+        with mock.patch.object(
+            console.ops,
+            "upload_to_oss",
+            return_value={"objectKey": "files/note.txt", "sizeBytes": 17, "sha256": up_rec["sha256"], "uploaded": True},
+        ):
+            st_oss_up, oss_up = self._req(
+                "POST",
+                "/api/cloud/oss/upload",
+                body={"sourceMode": "upload", "uploadId": up_rec["uploadId"], "prefixDir": "files/"},
+            )
+            self.assertEqual(st_oss_up, 200)
+            self.assertEqual(oss_up["objectKey"], "files/note.txt")
+            self.assertIn("Signature=", oss_up["signedUrl"])
+
+        with mock.patch.object(console.ops, "oss_request", return_value=(204, {}, b"")):
+            st_del_ok, del_ok = self._req(
+                "POST",
+                "/api/cloud/oss/delete",
+                body={"objectKey": "files/temp-qa.txt"},
+            )
+            self.assertEqual(st_del_ok, 200)
+            self.assertTrue(del_ok["deleted"])
+
 
 if __name__ == "__main__":
     unittest.main()
