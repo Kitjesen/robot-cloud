@@ -8,6 +8,20 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
+/// Returns true when a manifest or rollout `hardwareRevision` targets any compatible ARM64 board
+/// (e.g. RDK S100P, Jetson Xavier NX) rather than one specific board revision.
+pub fn is_universal_hardware_revision(hw: &str) -> bool {
+    matches!(
+        hw.trim().to_ascii_lowercase().as_str(),
+        "*" | "any" | "arm64-universal"
+    )
+}
+
+/// Returns true when a release/rollout `manifest_hw` is compatible with a device's `device_hw`.
+pub fn hardware_revision_matches(manifest_hw: &str, device_hw: &str) -> bool {
+    is_universal_hardware_revision(manifest_hw) || manifest_hw == device_hw
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactType {
@@ -243,7 +257,7 @@ impl Manifest {
         );
         ensure!(self.model == profile.model, "target_model_mismatch");
         ensure!(
-            self.hardware_revision == profile.hardware_revision,
+            hardware_revision_matches(&self.hardware_revision, &profile.hardware_revision),
             "target_hardware_mismatch"
         );
         ensure!(

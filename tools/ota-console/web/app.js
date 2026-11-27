@@ -1353,6 +1353,9 @@
     syncPubTypeFields();
     if (rel.version) $("pub-version").value = rel.version;
     if (rel.suggestedChannel) $("pub-channel").value = rel.suggestedChannel;
+    if (first?.name?.toLowerCase().includes("linux-arm64")) {
+      $("pub-hw").value = "arm64-universal";
+    }
     STATE.pubReleaseIdTouched = false;
     updateAutoReleaseId();
     const publishedText = rel.publishedAt ? formatTime(Date.parse(rel.publishedAt)) : "";

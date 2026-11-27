@@ -231,7 +231,7 @@ pub fn device_matches_rollout_target(rollout: &RolloutCampaign, device: &DeviceR
         return false;
     }
     if let Some(ref hw) = rollout.target_hardware_revision
-        && &device.hardware_revision != hw
+        && !doso_ota::hardware_revision_matches(hw, &device.hardware_revision)
     {
         return false;
     }

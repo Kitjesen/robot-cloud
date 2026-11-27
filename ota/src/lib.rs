@@ -14,7 +14,8 @@ pub use health::{
 };
 pub use manifest::{
     ArtifactType, BundleItem, DeltaSpec, Manifest, ManifestEnvelope, RollbackPolicy,
-    validate_component_name, validate_requires, validate_unit_name,
+    hardware_revision_matches, is_universal_hardware_revision, validate_component_name,
+    validate_requires, validate_unit_name,
 };
 pub use policy::{PolicyAdminClient, PolicyPushFailure, PolicyPushResponse};
 pub use server::{serve, serve_with_cloud};

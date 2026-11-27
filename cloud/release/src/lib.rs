@@ -1262,9 +1262,14 @@ async fn create_bundle_release(
         if model.is_empty() {
             model = src_template.manifest.model.clone();
             hardware_revision = src_template.manifest.hardware_revision.clone();
-        } else if src_template.manifest.model != model
-            || src_template.manifest.hardware_revision != hardware_revision
-        {
+        } else if src_template.manifest.model != model {
+            return error_response(StatusCode::CONFLICT, "bundle_source_incompatible");
+        } else if doso_ota::is_universal_hardware_revision(&hardware_revision) {
+            hardware_revision = src_template.manifest.hardware_revision.clone();
+        } else if !doso_ota::hardware_revision_matches(
+            &src_template.manifest.hardware_revision,
+            &hardware_revision,
+        ) {
             return error_response(StatusCode::CONFLICT, "bundle_source_incompatible");
         }
         if src_template.object_key.trim().is_empty() {
@@ -1395,12 +1400,21 @@ async fn start_job(
         Err(error) => return error_response(StatusCode::NOT_FOUND, &error.to_string()),
     };
     if template.manifest.model != device.model
-        || template.manifest.hardware_revision != device.hardware_revision
+        || !doso_ota::hardware_revision_matches(
+            &template.manifest.hardware_revision,
+            &device.hardware_revision,
+        )
     {
         return error_response(StatusCode::CONFLICT, "release_incompatible");
     }
     let now = now_ms();
-    let envelope = match build_signed_envelope(&state.config, &state.signing_key, template, now) {
+    let envelope = match build_signed_envelope(
+        &state.config,
+        &state.signing_key,
+        template,
+        now,
+        Some(&device.hardware_revision),
+    ) {
         Ok(envelope) => envelope,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     };
@@ -1580,7 +1594,13 @@ async fn agent_next_job(State(state): State<AppState>, Path(device_id): Path<Str
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
             }
         };
-        match build_signed_envelope(&state.config, &state.signing_key, template, now) {
+        match build_signed_envelope(
+            &state.config,
+            &state.signing_key,
+            template,
+            now,
+            Some(&device.hardware_revision),
+        ) {
             Ok(envelope) => {
                 job.manifest = envelope;
                 job.updated_at_ms = now;
@@ -1629,12 +1649,20 @@ async fn agent_next_job(State(state): State<AppState>, Path(device_id): Path<Str
             Err(_) => continue,
         };
         if template.manifest.model != device.model
-            || template.manifest.hardware_revision != device.hardware_revision
+            || !doso_ota::hardware_revision_matches(
+                &template.manifest.hardware_revision,
+                &device.hardware_revision,
+            )
         {
             continue;
         }
-        let envelope = match build_signed_envelope(&state.config, &state.signing_key, template, now)
-        {
+        let envelope = match build_signed_envelope(
+            &state.config,
+            &state.signing_key,
+            template,
+            now,
+            Some(&device.hardware_revision),
+        ) {
             Ok(env) => env,
             Err(error) => {
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
@@ -1782,12 +1810,15 @@ async fn create_rollout(
     if target_model != template.manifest.model {
         return error_response(StatusCode::CONFLICT, "rollout_model_mismatch");
     }
-    let target_hardware_revision = req
-        .target_hardware_revision
-        .clone()
-        .or_else(|| Some(template.manifest.hardware_revision.clone()));
+    let target_hardware_revision = req.target_hardware_revision.clone().or_else(|| {
+        if doso_ota::is_universal_hardware_revision(&template.manifest.hardware_revision) {
+            None
+        } else {
+            Some(template.manifest.hardware_revision.clone())
+        }
+    });
     if let Some(ref hw) = target_hardware_revision
-        && hw != &template.manifest.hardware_revision
+        && !doso_ota::hardware_revision_matches(&template.manifest.hardware_revision, hw)
     {
         return error_response(StatusCode::CONFLICT, "rollout_hardware_mismatch");
     }
@@ -2086,7 +2117,15 @@ fn build_signed_envelope(
     signing_key: &SigningKey,
     mut template: ReleaseTemplate,
     now_ms: i64,
+    device_hardware_revision: Option<&str>,
 ) -> Result<ManifestEnvelope> {
+    if let Some(dev_hw) = device_hardware_revision
+        && doso_ota::is_universal_hardware_revision(&template.manifest.hardware_revision)
+    {
+        // Rewrite universal ARM64 templates to the target device's concrete hardwareRevision
+        // before Ed25519 signing so legacy on-robot doso-ota binaries verify seamlessly.
+        template.manifest.hardware_revision = dev_hw.to_string();
+    }
     let default_ttl_ms = (config.signed_url_ttl_seconds.max(60) as i64).saturating_mul(1000);
     let template_ttl_ms = template
         .manifest
@@ -2210,7 +2249,10 @@ fn load_releases(root: &FsPath, device: &DeviceRecord) -> Result<Vec<ReleaseSumm
         }
         let template: ReleaseTemplate = serde_json::from_slice(&fs::read(path)?)?;
         if template.manifest.model == device.model
-            && template.manifest.hardware_revision == device.hardware_revision
+            && doso_ota::hardware_revision_matches(
+                &template.manifest.hardware_revision,
+                &device.hardware_revision,
+            )
         {
             output.push(summary_from_manifest(&template.manifest));
         }
@@ -4698,5 +4740,124 @@ mod tests {
         .unwrap();
         assert_eq!(dev_list.len(), 1);
         assert_eq!(dev_list[0]["deviceId"], "dog-01");
+    }
+
+    #[tokio::test]
+    async fn universal_arm64_release_matches_multiple_boards_and_rewrites_manifest_before_signing()
+    {
+        let dir = TestDir::new();
+        let token = "test-bearer-token-1234567890";
+        let (cfg, signing_key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "dog-rdk": {
+                    "model": "THUNDER 01",
+                    "hardwareRevision": "rdk-s100p",
+                    "enabled": true,
+                    "ring": "canary",
+                    "tags": ["dog3"]
+                },
+                "dog-nx": {
+                    "model": "THUNDER 01",
+                    "hardwareRevision": "jetson-xavier-nx",
+                    "enabled": true,
+                    "ring": "canary",
+                    "tags": ["dog4"]
+                }
+            }),
+            serde_json::json!({
+                "manifestVersion": 1,
+                "releaseId": "brainstem-0.0.6-qa",
+                "channel": "qa",
+                "sequence": 210,
+                "version": "0.0.6-qa.1",
+                "issuedAtMs": 0,
+                "expiresAtMs": 1800000,
+                "model": "THUNDER 01",
+                "hardwareRevision": "arm64-universal",
+                "minimumBootloaderVersion": "1.0.0",
+                "minimumBrainstemVersion": "0.0.1",
+                "minimumBatteryPercent": 20,
+                "artifactUrl": "https://placeholder.invalid/signed",
+                "artifactSizeBytes": 4096,
+                "artifactSha256": "a".repeat(64),
+                "keyId": "release-key-2026-01",
+                "rollbackPolicy": { "mode": "automatic", "healthTimeoutMs": 30000 },
+                "artifactType": "brainstem_release"
+            }),
+            "firmware/qa/brainstem-0.0.6-qa/brainstem.tar.gz",
+            "brainstem-0.0.6-qa",
+        );
+        let verifying_key = signing_key.verifying_key();
+        let app = build_router(cfg).unwrap();
+
+        for dev in ["dog-rdk", "dog-nx"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/v1/devices/{dev}/firmware/releases"))
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let rels: Vec<serde_json::Value> = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), 65536).await.unwrap(),
+            )
+            .unwrap();
+            assert_eq!(rels.len(), 1);
+            assert_eq!(rels[0]["releaseId"], "brainstem-0.0.6-qa");
+        }
+
+        let ro_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "rolloutId": "ro-universal-1",
+                            "releaseId": "brainstem-0.0.6-qa",
+                            "targetModel": "THUNDER 01",
+                            "stages": [{ "name": "canary", "ring": "canary", "percent": 100 }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ro_resp.status(), StatusCode::CREATED);
+
+        for (dev, expected_hw) in [("dog-rdk", "rdk-s100p"), ("dog-nx", "jetson-xavier-nx")] {
+            let next = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/v1/agent/devices/{dev}/next-job"))
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(next.status(), StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(next.into_body(), 65536).await.unwrap(),
+            )
+            .unwrap();
+            let env: doso_ota::ManifestEnvelope =
+                serde_json::from_value(body["manifest"].clone()).unwrap();
+            let manifest = env.decode(&verifying_key).unwrap();
+            assert_eq!(manifest.hardware_revision, expected_hw);
+        }
     }
 }
