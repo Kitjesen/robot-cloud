@@ -79,22 +79,16 @@ FROM (
     COALESCE(d.serial_number, '') AS "serialNumber",
     COALESCE(d.display_name, '') AS "displayName",
     COALESCE(d.model_code, '') AS "modelCode",
-    COALESCE(d.category, '') AS "category",
-    COALESCE(d.environment, '') AS "environment",
-    d.is_demo AS "isDemo",
     d.is_simulated AS "isSimulated",
     COALESCE(d.owner_id::text, '') AS "ownerId",
     COALESCE(p.email, '') AS "ownerEmail",
-    COALESCE(p.display_name, '') AS "ownerName",
-    COALESCE(d.firmware_version, '') AS "dbFirmwareVersion",
-    d.battery_percent AS "dbBatteryPercent",
     CASE WHEN r.device_id IS NULL THEN NULL ELSE json_build_object(
       'enabled', r.enabled,
-      'revision', r.revision,
       'gatewayReachable', r.gateway_reachable,
       'lastSeenAt', r.last_seen_at,
-      'lastSeq', r.last_seq,
-      'latest', r.latest
+      'cmsState', COALESCE(r.latest->'report'->'status'->'state'->>'kind', ''),
+      'motorOutputEnabled', (r.latest->'report'->'status'->'control'->>'motorOutputEnabled')::boolean,
+      'criticalMotorFault', (r.latest->'report'->'status'->'control'->>'criticalMotorFault')::boolean
     ) END AS "remoteState"
   FROM public.devices d
   LEFT JOIN public.profiles p ON p.id = d.owner_id
@@ -172,10 +166,13 @@ def diagnose_device(
     tunnel_port = dev.get("tunnelPort")
     latest_job = dev.get("latestJob") or {}
 
-    # 1. Hardware / motion critical fault from MQTT remote_state telemetry
+    # 1. Hardware / motion critical fault from MQTT remote_state telemetry (supports both compact scalar & raw latest)
     report_status = ((remote.get("latest") or {}).get("report") or {}).get("status") or {}
     ctrl = report_status.get("control") or {}
-    if ctrl.get("criticalMotorFault") is True:
+    crit_fault = remote.get("criticalMotorFault")
+    if crit_fault is None:
+        crit_fault = ctrl.get("criticalMotorFault")
+    if crit_fault is True:
         anomalies.append(
             {
                 "code": "critical_motor_fault",
@@ -378,11 +375,16 @@ def build_unified_fleet(
         if tunnel_port is not None:
             matched_ports.add(tunnel_port)
 
-        remote = (inv or {}).get("remoteState")
+        remote = (inv or {}).get("remoteState") or None
         report_status = (((remote or {}).get("latest") or {}).get("report") or {}).get("status") or {}
-        cms_state = str(((report_status.get("state") or {}).get("kind") or "")).replace("CMS_STATE_KIND_", "").lower()
-        motor_enabled = (report_status.get("control") or {}).get("motorOutputEnabled")
-        critical_fault = (report_status.get("control") or {}).get("criticalMotorFault")
+        raw_cms = (remote or {}).get("cmsState") or ((report_status.get("state") or {}).get("kind") or "")
+        cms_state = str(raw_cms).replace("CMS_STATE_KIND_", "").lower()
+        motor_enabled = (remote or {}).get("motorOutputEnabled")
+        if motor_enabled is None:
+            motor_enabled = (report_status.get("control") or {}).get("motorOutputEnabled")
+        critical_fault = (remote or {}).get("criticalMotorFault")
+        if critical_fault is None:
+            critical_fault = (report_status.get("control") or {}).get("criticalMotorFault")
         location = report_status.get("location")
 
         ota_age = (st or {}).get("lastSeenAgeMs")
@@ -486,27 +488,58 @@ def patrol_fleet(
             "error": None,
         }
         try:
-            st = robot_ops.get_robot_status(cfg, target)
-            item["reachable"] = True
-            item["hostname"] = st.get("hostname")
-            item["uptime"] = st.get("uptime")
-            item["services"] = st.get("services") or []
-            item["health"] = st.get("health") or {}
-            item["disk"] = st.get("disk")
-            item["memory"] = st.get("memory")
-
-            # Fetch 1-hour err log summary across core services
+            # Single SSH session & single compound command per robot to minimize tunnel load.
+            svc_args = " ".join(robot_ops.ALLOWED_SERVICES)
+            compound = (
+                "printf '===HOST===\\n'; hostname; "
+                "printf '===UPTIME===\\n'; uptime -p 2>/dev/null || uptime; "
+                "printf '===DISK===\\n'; df -B1 / /opt/doso 2>/dev/null | tail -n +2 | head -n 1; "
+                f"printf '===SVCS===\\n'; for s in {svc_args}; do printf '%s=%s\\n' \"$s\" \"$(systemctl is-active \"$s\" 2>/dev/null || true)\"; done; "
+                "printf '===HEALTH===\\n'; curl -s --max-time 3 http://127.0.0.1:5054/health || echo '{}'; "
+                "printf '\\n===ERRS===\\n'; "
+                "journalctl --since '1 hour ago' -p err "
+                "-u doso-brainstem.service -u doso-ota.service "
+                "-u doso-cloud-link.service -u doso-ops-tunnel.service "
+                "-n 30 --no-pager -q 2>/dev/null || true"
+            )
             with robot_ops.open_robot_ssh(cfg, target, timeout_s=10) as client:
-                err_cmd = (
-                    "journalctl --since '1 hour ago' -p err "
-                    "-u doso-brainstem.service -u doso-ota.service "
-                    "-u doso-cloud-link.service -u doso-ops-tunnel.service "
-                    "--no-pager -q 2>/dev/null || true"
-                )
-                _, err_out, _ = robot_ops._exec_sudo(client, cfg, err_cmd, timeout_s=10, target=target)
-                err_lines = [l for l in err_out.splitlines() if l.strip() and not l.startswith("-- ")]
-                item["recentErrorCount"] = len(err_lines)
-                item["recentErrors"] = err_lines[-8:]
+                _, raw_out, _ = robot_ops._exec_sudo(client, cfg, compound, timeout_s=12, target=target)
+
+            secs: dict[str, list[str]] = {}
+            cur = ""
+            for line in raw_out.splitlines():
+                m = re.fullmatch(r"===([A-Z]+)===", line.strip())
+                if m:
+                    cur = m.group(1)
+                    secs[cur] = []
+                elif cur:
+                    secs[cur].append(line)
+
+            item["reachable"] = True
+            item["hostname"] = (secs.get("HOST") or [""])[0].strip()
+            item["uptime"] = (secs.get("UPTIME") or [""])[0].strip()
+            item["services"] = [
+                {"unit": ln.split("=", 1)[0].strip(), "state": ln.split("=", 1)[1].strip() or "unknown"}
+                for ln in secs.get("SVCS", [])
+                if "=" in ln
+            ]
+            try:
+                item["health"] = json.loads("\n".join(secs.get("HEALTH", [])).strip() or "{}")
+            except ValueError:
+                item["health"] = {}
+            for dline in secs.get("DISK", []):
+                parts = dline.split()
+                if len(parts) >= 6 and parts[1].isdigit() and parts[3].isdigit():
+                    item["disk"] = {
+                        "mount": parts[5],
+                        "totalBytes": int(parts[1]),
+                        "availBytes": int(parts[3]),
+                        "usePercent": parts[4],
+                    }
+                    break
+            err_lines = [l for l in secs.get("ERRS", []) if l.strip() and not l.startswith("-- ")]
+            item["recentErrorCount"] = len(err_lines)
+            item["recentErrors"] = err_lines[-6:]
 
             issues: list[dict[str, str]] = []
             for svc in item["services"]:

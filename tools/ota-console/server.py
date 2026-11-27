@@ -602,6 +602,25 @@ class ConsoleContext:
         self.uploads = UploadStore()
         self.jobs = JobTracker()
         self.allow_remote = allow_remote
+        self._cache_lock = threading.Lock()
+        self._swas_cache: tuple[float, dict[str, Any]] | None = None
+        self._android_cache: tuple[float, dict[str, Any]] | None = None
+
+    def invalidate_caches(self) -> None:
+        with self._cache_lock:
+            self._swas_cache = None
+            self._android_cache = None
+
+    def _get_swas_snapshot_cached(self, cfg: dict[str, str], force: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        if not force:
+            with self._cache_lock:
+                if self._swas_cache and (now - self._swas_cache[0]) < 30.0:
+                    return self._swas_cache[1]
+        snap = fleet_ops.fetch_swas_fleet_snapshot(cfg)
+        with self._cache_lock:
+            self._swas_cache = (time.monotonic(), snap)
+        return snap
 
     def _require_token(self, cfg: dict[str, str]) -> str:
         token = cfg.get("DOSO_RELEASE_API_TOKEN", "").strip()
@@ -667,7 +686,7 @@ class ConsoleContext:
         res["releasesApiReady"] = st_rel == 200
         return res
 
-    def get_overview(self) -> dict[str, Any]:
+    def get_overview(self, *, force: bool = False, light: bool = False) -> dict[str, Any]:
         cfg = self.config_store.effective()
         base_url = cfg["DOSO_OTA_CLOUD_URL"]
         token = cfg["DOSO_RELEASE_API_TOKEN"]
@@ -702,25 +721,39 @@ class ConsoleContext:
             except ops.OpsError as exc:
                 return None, None, str(exc)
 
+        cached_android: dict[str, Any] | None = None
+        if not force:
+            with self._cache_lock:
+                if self._android_cache and (time.monotonic() - self._android_cache[0]) < 60.0:
+                    cached_android = self._android_cache[1]
+
         tracked_list = self.jobs.list_items()
         disable_swas = os.environ.get("DOSO_OTA_CONSOLE_DISABLE_SWAS", "").strip() == "1"
         with ThreadPoolExecutor(max_workers=12) as pool:
             f_health = pool.submit(_safe_get, "/health", False, 8)
-            f_android = {
-                ch: pool.submit(
-                    _safe_get,
-                    f"/v1/apps/android/latest?channel={urllib.parse.quote(ch)}&version_code=0",
-                    False,
-                    8,
-                )
-                for ch in ANDROID_CHANNELS
-            }
+            f_android = (
+                {}
+                if cached_android is not None
+                else {
+                    ch: pool.submit(
+                        _safe_get,
+                        f"/v1/apps/android/latest?channel={urllib.parse.quote(ch)}&version_code=0",
+                        False,
+                        8,
+                    )
+                    for ch in ANDROID_CHANNELS
+                }
+            )
             f_dev = pool.submit(_safe_get, "/v1/devices/status", True, 12) if token else None
             f_reg = pool.submit(_safe_get, "/v1/devices", True, 12) if token else None
             f_rel = pool.submit(_safe_get, "/v1/releases", True, 12) if token else None
             f_ro = pool.submit(_safe_get, "/v1/rollouts", True, 12) if token else None
-            f_jobs_all = pool.submit(_safe_get, "/v1/jobs?limit=200", True, 12) if token else None
-            f_swas = pool.submit(fleet_ops.fetch_swas_fleet_snapshot, cfg) if not disable_swas else None
+            f_jobs_all = pool.submit(_safe_get, "/v1/jobs?limit=100", True, 12) if token else None
+            f_swas = (
+                pool.submit(self._get_swas_snapshot_cached, cfg, force and not light)
+                if not disable_swas
+                else None
+            )
             f_jobs = [
                 (
                     tracked,
@@ -748,9 +781,16 @@ class ConsoleContext:
                 out["tunnelPorts"] = unified["tunnelPorts"]
                 return out
 
-            for ch, fut in f_android.items():
-                st_a, body_a, _ = fut.result()
-                out["android"][ch] = body_a if st_a == 200 else None
+            if cached_android is not None:
+                out["android"] = dict(cached_android)
+            else:
+                fresh_android: dict[str, Any] = {}
+                for ch, fut in f_android.items():
+                    st_a, body_a, _ = fut.result()
+                    fresh_android[ch] = body_a if st_a == 200 else None
+                out["android"] = fresh_android
+                with self._cache_lock:
+                    self._android_cache = (time.monotonic(), dict(fresh_android))
 
             if not token:
                 swas_snap = f_swas.result() if f_swas is not None else None
@@ -1299,7 +1339,10 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     self._send_json(HTTPStatus.OK, ctx.check_health())
                     return
                 if path == "/api/overview":
-                    self._send_json(HTTPStatus.OK, ctx.get_overview())
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    force = qs.get("force", ["0"])[0] == "1"
+                    light = qs.get("light", ["0"])[0] == "1"
+                    self._send_json(HTTPStatus.OK, ctx.get_overview(force=force, light=light))
                     return
                 if path == "/api/local-artifacts":
                     self._send_json(HTTPStatus.OK, detect_local_artifacts())
@@ -1475,6 +1518,7 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/provision/run":
                     cfg = ctx.config_store.effective()
                     res = provision_ops.provision_robot(cfg, ops, body, repo_root=REPO_ROOT)
+                    ctx.invalidate_caches()
                     self._send_json(HTTPStatus.OK, res)
                     return
 
@@ -1583,6 +1627,7 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     res = fleet_ops.update_device_owner(
                         cfg, str(body.get("deviceId") or ""), str(body.get("ownerEmail") or "")
                     )
+                    ctx.invalidate_caches()
                     self._send_json(HTTPStatus.OK, res)
                     return
 
@@ -1684,6 +1729,7 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
 
                 if path == "/api/android/publish":
                     res = ctx.publish_android_release(body)
+                    ctx.invalidate_caches()
                     self._send_json(HTTPStatus.OK, res)
                     return
 

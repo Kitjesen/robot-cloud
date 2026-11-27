@@ -28,14 +28,15 @@
 
   const VIEW_META = {
     devices: { title: "车队总览", cta: "发布固件" },
-    jobs: { title: "升级任务", cta: "发布固件" },
-    releases: { title: "机器狗版本", cta: "发布固件" },
-    rollouts: { title: "灰度发布", cta: "新建灰度" },
-    android: { title: "App 更新", cta: null },
+    jobs: { title: "版本发版", cta: "发布固件" },
+    releases: { title: "版本发版", cta: "发布固件" },
+    rollouts: { title: "版本发版", cta: "新建灰度" },
+    android: { title: "版本发版", cta: null },
     ops: { title: "机载运维", cta: null },
     accounts: { title: "账号权限", cta: null },
-    settings: { title: "云端配置", cta: null },
+    settings: { title: "系统配置", cta: null },
   };
+  const RELEASE_HUB_VIEWS = new Set(["releases", "jobs", "rollouts", "android"]);
 
   const ARTIFACT_LABELS = {
     brainstem_release: "核心固件",
@@ -194,9 +195,18 @@
 
   function setView(viewName) {
     STATE.view = viewName;
+    const isReleaseHub = RELEASE_HUB_VIEWS.has(viewName);
+    const activeNav = isReleaseHub ? "releases" : viewName;
     document.querySelectorAll(".nav-item").forEach((btn) => {
-      btn.classList.toggle("active", btn.dataset.view === viewName);
+      btn.classList.toggle("active", btn.dataset.view === activeNav);
     });
+    const hubBar = $("release-hub-tabs");
+    if (hubBar) {
+      hubBar.classList.toggle("hidden", !isReleaseHub);
+      document.querySelectorAll("#release-hub-tabs .hub-tab").forEach((t) => {
+        t.classList.toggle("active", t.dataset.releaseTab === viewName);
+      });
+    }
     document.querySelectorAll(".view").forEach((sec) => {
       sec.classList.toggle("active", sec.id === `view-${viewName}`);
     });
@@ -358,9 +368,9 @@
     const attentionJobs = jobs.filter(
       (j) => ACTIVE_PHASES.has(j.phase) || j.phase === "failed" || j.phase === "rolled_back" || j.phase === "recovery_required"
     ).length;
-    $("nav-count-jobs").textContent = String(attentionJobs || jobs.length);
-    $("nav-count-releases").textContent = String(releases.length);
-    $("nav-count-rollouts").textContent = String(rollouts.length);
+    if ($("tab-count-jobs")) $("tab-count-jobs").textContent = String(attentionJobs || jobs.length);
+    if ($("nav-count-releases")) $("nav-count-releases").textContent = String(releases.length);
+    if ($("tab-count-rollouts")) $("tab-count-rollouts").textContent = String(rollouts.length);
 
     // Sync batch release selector
     const batchSel = $("batch-release-select");
@@ -460,7 +470,7 @@
 
     const tbody = $("devices-tbody");
     if (!filtered.length) {
-      tbody.innerHTML = `<tr><td colspan="7" class="empty-cell">暂无匹配的机器狗</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6" class="empty-cell">暂无匹配的机器狗</td></tr>`;
       syncBatchBar();
       return;
     }
@@ -482,7 +492,7 @@
         const tunPill = d.tunnelPort
           ? `<span class="link-pill on">:${esc(d.tunnelPort)}</span>`
           : `<span class="link-pill">隧道</span>`;
-        const hbAge = st?.lastSeenAgeMs !== undefined ? formatAge(st.lastSeenAgeMs) : d.telemetry?.lastSeenAt ? formatTime(Date.parse(d.telemetry.lastSeenAt)) : "—";
+        const hbAge = st?.lastSeenAgeMs !== undefined ? formatAge(st.lastSeenAgeMs) : d.telemetry?.lastSeenAt ? formatTime(Date.parse(d.telemetry.lastSeenAt)) : "未上报";
 
         return `
           <tr class="row-clickable" data-row-device="${esc(d.deviceId)}">
@@ -492,7 +502,10 @@
               <div class="sub-line">${esc(subMeta || d.deviceId)}</div>
             </td>
             <td>
-              <div>${healthBadgeHtml(d)}</div>
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                ${healthBadgeHtml(d)}
+                <span class="sub-line">${esc(hbAge)}</span>
+              </div>
               ${
                 primaryAnom
                   ? `<div class="sub-line" style="margin-top:3px;color:${
@@ -507,7 +520,6 @@
               <span style="margin-left:6px;">${esc(st?.firmwareVersion || "—")}</span>
               <div class="sub-line mono">${esc(d.hardwareRevision || d.model || "")}</div>
             </td>
-            <td>${esc(hbAge)}</td>
             <td class="col-actions">
               <button class="btn btn-sm btn-ghost" data-detail-device="${esc(d.deviceId)}" type="button">详情</button>
               ${
@@ -515,7 +527,7 @@
                   ? `<button class="btn btn-sm btn-ghost" data-jump-ops-port="${esc(d.tunnelPort)}" type="button">运维</button>`
                   : ""
               }
-              <button class="btn btn-sm btn-ghost" data-push-device="${esc(d.deviceId)}" type="button">推送</button>
+              <button class="btn btn-sm btn-ghost" data-push-device="${esc(d.deviceId)}" type="button">升级</button>
             </td>
           </tr>`;
       })
@@ -1019,19 +1031,21 @@
       clearTimeout(STATE.pollTimer);
       STATE.pollTimer = null;
     }
+    if (document.hidden) return;
     const jobs = STATE.overview?.trackedJobs || [];
     const hasActive = jobs.some((j) => ACTIVE_PHASES.has(j.phase));
     if (hasActive) {
-      STATE.pollTimer = setTimeout(() => refreshAll(true), 3000);
+      STATE.pollTimer = setTimeout(() => refreshAll(true), 5000);
     }
   }
 
-  async function refreshAll(silent = false) {
+  async function refreshAll(silent = false, force = false) {
     const btn = $("btn-refresh");
     const icon = btn.querySelector("svg");
     if (!silent) icon.classList.add("spin");
     try {
-      const ov = await apiFetch("/api/overview");
+      const qs = force ? "?force=1" : silent ? "?light=1" : "";
+      const ov = await apiFetch(`/api/overview${qs}`);
       STATE.overview = ov;
       renderConnectionStatus(ov);
       renderMetrics(ov);
@@ -1475,10 +1489,16 @@
     document.querySelectorAll(".nav-item").forEach((btn) => {
       btn.addEventListener("click", () => setView(btn.dataset.view));
     });
+    document.querySelectorAll("#release-hub-tabs .hub-tab").forEach((btn) => {
+      btn.addEventListener("click", () => setView(btn.dataset.releaseTab));
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) scheduleJobPolling();
+    });
     $("mobile-menu-btn").addEventListener("click", () => $("sidebar").classList.toggle("open"));
     $("conn-pill").addEventListener("click", () => setView("settings"));
     $("btn-goto-settings").addEventListener("click", () => setView("settings"));
-    $("btn-refresh").addEventListener("click", () => refreshAll(false));
+    $("btn-refresh").addEventListener("click", () => refreshAll(false, true));
 
     $("btn-primary-cta").addEventListener("click", () => {
       if (STATE.view === "rollouts") {
@@ -1502,8 +1522,14 @@
     // Devices & Registry
     $("device-search").addEventListener("input", () => renderDevices(STATE.overview));
     $("release-search").addEventListener("input", () => renderReleases(STATE.overview?.releases));
-    $("btn-manual-push").addEventListener("click", () => openPushDrawer());
-    $("btn-add-device").addEventListener("click", () => openDeviceDrawer(null));
+    $("btn-manual-push").addEventListener("click", () => {
+      if ($("fleet-more-menu")) $("fleet-more-menu").open = false;
+      openPushDrawer();
+    });
+    $("btn-add-device").addEventListener("click", () => {
+      if ($("fleet-more-menu")) $("fleet-more-menu").open = false;
+      openDeviceDrawer(null);
+    });
     $("btn-open-provision").addEventListener("click", () => openProvisionDrawer());
     $("btn-open-bundle").addEventListener("click", () => openBundleDrawer());
 
@@ -1688,7 +1714,7 @@
         toast(err.message, "err");
       } finally {
         btn.disabled = false;
-        btn.textContent = "全车队巡检";
+        btn.textContent = "巡检";
       }
     });
     $("patrol-list").addEventListener("click", (e) => {
