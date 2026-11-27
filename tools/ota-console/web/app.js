@@ -782,9 +782,9 @@
                 <div style="display:flex;align-items:center;gap:8px;">
                   ${roleBadge}
                   <select class="compact-select" data-role-select="${esc(acc.id)}" ${isPrimary ? "disabled" : ""}>
-                    <option value="user" ${acc.appRole === "user" ? "selected" : ""}>普通用户 (user)</option>
-                    <option value="support" ${acc.appRole === "support" ? "selected" : ""}>技术支持 (support)</option>
-                    <option value="admin" ${acc.appRole === "admin" ? "selected" : ""}>管理员 (admin)</option>
+                    <option value="user" ${acc.appRole === "user" ? "selected" : ""}>普通用户</option>
+                    <option value="support" ${acc.appRole === "support" ? "selected" : ""}>技术支持</option>
+                    <option value="admin" ${acc.appRole === "admin" ? "selected" : ""}>管理员</option>
                   </select>
                 </div>
               </td>
