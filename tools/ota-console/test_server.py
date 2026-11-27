@@ -30,6 +30,16 @@ class MockCloudState:
     def __init__(self, expected_token: str = "secret-bearer-token-123456") -> None:
         self.expected_token = expected_token
         self.releases: dict[str, dict[str, Any]] = {}
+        self.registered_devices: dict[str, dict[str, Any]] = {
+            "dog-01": {
+                "deviceId": "dog-01",
+                "model": "THUNDER 01",
+                "hardwareRevision": "rdk-s100p",
+                "enabled": True,
+                "ring": "canary",
+                "tags": ["dog1"],
+            }
+        }
         self.devices: list[dict[str, Any]] = [
             {
                 "deviceId": "dog-01",
@@ -101,6 +111,9 @@ def start_mock_cloud(state: MockCloudState) -> tuple[ThreadingHTTPServer, str]:
 
             if not self._check_auth():
                 return
+            if path == "/v1/devices":
+                self._send(200, list(state.registered_devices.values()))
+                return
             if path == "/v1/devices/status":
                 self._send(200, state.devices)
                 return
@@ -123,12 +136,54 @@ def start_mock_cloud(state: MockCloudState) -> tuple[ThreadingHTTPServer, str]:
                 return
             self._send(404, {"error": "not_found"})
 
+        def do_PUT(self) -> None:
+            if not self._check_auth():
+                return
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            body = self._read_json()
+            if path.startswith("/v1/devices/"):
+                dev_id = urllib.parse.unquote(path.split("/", 3)[3])
+                rec = {"deviceId": dev_id, **body}
+                state.registered_devices[dev_id] = rec
+                self._send(200, rec)
+                return
+            self._send(404, {"error": "not_found"})
+
+        def do_DELETE(self) -> None:
+            if not self._check_auth():
+                return
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            if path.startswith("/v1/devices/"):
+                dev_id = urllib.parse.unquote(path.split("/", 3)[3])
+                state.registered_devices.pop(dev_id, None)
+                self._send(200, {"deleted": True, "deviceId": dev_id})
+                return
+            self._send(404, {"error": "not_found"})
+
         def do_POST(self) -> None:
             if not self._check_auth():
                 return
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path
             body = self._read_json()
+
+            if path == "/v1/releases/bundle":
+                summary = {
+                    "releaseId": body["releaseId"],
+                    "version": body["version"],
+                    "sequence": body["sequence"],
+                    "channel": body["channel"],
+                    "model": "THUNDER 01",
+                    "hardwareRevision": "rdk-s100p",
+                    "artifactSizeBytes": 0,
+                    "artifactSha256": "",
+                    "artifactType": "release_bundle",
+                }
+                state.releases[body["releaseId"]] = summary
+                self._send(201, summary)
+                return
 
             if path == "/v1/releases":
                 m = body["manifest"]
@@ -495,6 +550,71 @@ class OtaConsoleTests(unittest.TestCase):
         st_ov, ov = self._req("GET", "/api/overview")
         self.assertEqual(st_ov, 200)
         self.assertEqual(ov["android"]["qa"]["versionCode"], 57)
+
+    def test_device_crud_bundle_and_robot_ops_guardrails(self) -> None:
+        self._configure_console()
+
+        # Device auto-UUID registration & deletion
+        st_up, saved = self._req(
+            "POST",
+            "/api/devices/upsert",
+            body={"model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "ring": "prod", "tags": "batch1, dog9"},
+        )
+        self.assertEqual(st_up, 200)
+        self.assertEqual(saved["ring"], "prod")
+        self.assertEqual(saved["tags"], ["batch1", "dog9"])
+        new_id = saved["deviceId"]
+        self.assertGreaterEqual(len(new_id), 32)
+
+        st_del, deleted = self._req("POST", f"/api/devices/{new_id}/delete", body={})
+        self.assertEqual(st_del, 200)
+        self.assertTrue(deleted["deleted"])
+
+        # Release bundle composition
+        st_b, bundle = self._req(
+            "POST",
+            "/api/releases/bundle",
+            body={
+                "releaseId": "bundle-1.0.0-stable",
+                "version": "1.0.0",
+                "sequence": 50,
+                "channel": "stable",
+                "sourceReleaseIds": ["rel-1"],
+            },
+        )
+        self.assertEqual(st_b, 201)
+        self.assertEqual(bundle["artifactType"], "release_bundle")
+
+        # Robot ops safety guardrails
+        st_bad_svc, err_svc = self._req(
+            "POST",
+            "/api/ops/service",
+            body={"target": {"mode": "tunnel", "port": 22003}, "unit": "sshd.service", "action": "stop"},
+        )
+        self.assertEqual(st_bad_svc, 400)
+        self.assertIn("白名单", err_svc["error"])
+
+        st_bad_del, err_del = self._req(
+            "POST",
+            "/api/ops/files/delete",
+            body={"target": {"mode": "tunnel", "port": 22003}, "path": "/etc/doso"},
+        )
+        self.assertEqual(st_bad_del, 400)
+        self.assertIn("禁止删除", err_del["error"])
+
+        # Mocked ops status & file listing
+        with mock.patch.object(
+            console.robot_ops,
+            "list_dir",
+            return_value={"path": "/opt/doso", "parent": "/opt", "entries": [{"name": "data", "path": "/opt/doso/data", "isDir": True, "sizeBytes": 0, "mode": "755", "modifiedAtMs": 0}]},
+        ):
+            st_ls, ls = self._req(
+                "POST",
+                "/api/ops/files/list",
+                body={"target": {"mode": "tunnel", "port": 22003}, "path": "/opt/doso"},
+            )
+            self.assertEqual(st_ls, 200)
+            self.assertEqual(ls["entries"][0]["name"], "data")
 
 
 if __name__ == "__main__":

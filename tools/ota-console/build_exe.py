@@ -12,6 +12,7 @@ from pathlib import Path
 CONSOLE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CONSOLE_DIR.parent.parent
 SERVER_PY = CONSOLE_DIR / "server.py"
+ROBOT_OPS_PY = CONSOLE_DIR / "robot_ops.py"
 WEB_DIR = CONSOLE_DIR / "web"
 OPS_PY = REPO_ROOT / "tools" / "deploy" / "doso-ota-ops.py"
 DEFAULT_DIST = REPO_ROOT / "artifacts" / "ota-console"
@@ -38,7 +39,6 @@ EXCLUDES = [
     "PySide6",
     "wx",
     "lxml",
-    "cryptography",
     "OpenSSL",
     "setuptools",
     "pkg_resources",
@@ -76,10 +76,16 @@ def main() -> int:
             f"{WEB_DIR}{sep}web",
             "--add-data",
             f"{OPS_PY}{sep}.",
+            "--add-data",
+            f"{ROBOT_OPS_PY}{sep}.",
             "--hidden-import",
             "tkinter",
             "--hidden-import",
             "tkinter.filedialog",
+            "--hidden-import",
+            "paramiko",
+            "--collect-submodules",
+            "cryptography",
         ]
         for mod in EXCLUDES:
             cmd.extend(["--exclude-module", mod])

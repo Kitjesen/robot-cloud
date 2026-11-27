@@ -43,6 +43,11 @@
 
         <div class="nav-divider"></div>
 
+        <button class="nav-item" data-view="ops" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          <span>机载运维</span>
+        </button>
+
         <button class="nav-item" data-view="settings" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
           <span>云端配置</span>
@@ -84,7 +89,7 @@
         <section class="view active" id="view-devices">
           <div class="metrics">
             <div class="metric">
-              <div class="metric-label">设备总数</div>
+              <div class="metric-label">登记设备</div>
               <div class="metric-value" id="stat-devices">0</div>
             </div>
             <div class="metric">
@@ -110,9 +115,10 @@
 
           <div class="section-block">
             <div class="section-head">
-              <h2>已上报设备</h2>
+              <h2>车队设备</h2>
               <div class="section-actions">
-                <input class="search-input" id="device-search" type="search" placeholder="搜索设备编号或版本" />
+                <input class="search-input" id="device-search" type="search" placeholder="搜索设备编号、分环或版本" />
+                <button class="btn btn-ghost btn-sm" id="btn-add-device" type="button">登记设备</button>
                 <button class="btn btn-ghost btn-sm" id="btn-manual-push" type="button">按编号推送</button>
               </div>
             </div>
@@ -121,9 +127,9 @@
                 <thead>
                   <tr>
                     <th>设备编号</th>
+                    <th>分环</th>
                     <th>状态</th>
                     <th>固件版本</th>
-                    <th>策略配置</th>
                     <th>最近心跳</th>
                     <th class="col-actions">操作</th>
                   </tr>
@@ -141,6 +147,7 @@
               <h2>云端版本库</h2>
               <div class="section-actions">
                 <input class="search-input" id="release-search" type="search" placeholder="搜索版本编号或类型" />
+                <button class="btn btn-ghost btn-sm" id="btn-open-bundle" type="button">合成整机包</button>
               </div>
             </div>
             <div class="table-wrap">
@@ -266,7 +273,125 @@
           </div>
         </section>
 
-        <!-- View 5: Settings -->
+        <!-- View 5: Robot Remote Ops (Service Control, Logs, File Manager) -->
+        <section class="view" id="view-ops">
+          <div class="ops-connect-bar">
+            <div class="ops-connect-group">
+              <div class="segmented" id="ops-mode-tabs">
+                <button type="button" class="seg-btn active" data-ops-mode="tunnel">云端隧道</button>
+                <button type="button" class="seg-btn" data-ops-mode="direct">局域网直连</button>
+              </div>
+              <div id="ops-tunnel-picker" class="ops-inline">
+                <select id="ops-tunnel-select"></select>
+                <button class="btn btn-ghost btn-sm" id="btn-ops-scan" type="button">扫描在线通道</button>
+              </div>
+              <div id="ops-direct-picker" class="ops-inline hidden">
+                <input id="ops-direct-host" type="text" placeholder="192.168.66.13" value="192.168.66.13" style="width:160px;" />
+              </div>
+            </div>
+            <button class="btn btn-primary btn-sm" id="btn-ops-connect" type="button">连接机器狗</button>
+          </div>
+
+          <div class="ops-subtabs" id="ops-subtabs">
+            <button type="button" class="subtab active" data-ops-tab="control">状态与控制</button>
+            <button type="button" class="subtab" data-ops-tab="files">文件管理</button>
+            <button type="button" class="subtab" data-ops-tab="logs">实时日志</button>
+          </div>
+
+          <!-- Ops Tab 1: Status & Service Control -->
+          <div class="ops-pane active" id="ops-pane-control">
+            <div class="metrics" id="ops-metrics">
+              <div class="metric">
+                <div class="metric-label">主控状态</div>
+                <div class="metric-value metric-value-sm" id="ops-st-ready">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">电机输出</div>
+                <div class="metric-value metric-value-sm" id="ops-st-motor">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">母线电压</div>
+                <div class="metric-value metric-value-sm" id="ops-st-vbus">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">磁盘占用</div>
+                <div class="metric-value metric-value-sm" id="ops-st-disk">—</div>
+              </div>
+            </div>
+
+            <div class="section-block">
+              <div class="section-head">
+                <h2>机载服务控制</h2>
+                <span class="sub-line" id="ops-host-meta">未连接</span>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>服务名称</th>
+                      <th>运行状态</th>
+                      <th class="col-actions">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ops-services-tbody">
+                    <tr><td colspan="3" class="empty-cell">请先连接机器狗</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Ops Tab 2: File Manager -->
+          <div class="ops-pane" id="ops-pane-files">
+            <div class="quick-chips" id="ops-quick-dirs" style="margin-bottom:12px;"></div>
+            <div class="file-toolbar">
+              <button class="btn btn-ghost btn-sm" id="btn-fs-up" type="button">上级目录</button>
+              <input id="fs-path-input" type="text" value="/opt/doso" class="mono" style="flex:1;" />
+              <button class="btn btn-ghost btn-sm" id="btn-fs-go" type="button">前往</button>
+              <button class="btn btn-ghost btn-sm" id="btn-fs-mkdir" type="button">新建目录</button>
+              <input type="file" id="fs-upload-input" hidden />
+              <button class="btn btn-primary btn-sm" id="btn-fs-upload" type="button">上传文件</button>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>名称</th>
+                    <th>大小</th>
+                    <th>权限</th>
+                    <th>修改时间</th>
+                    <th class="col-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="ops-files-tbody">
+                  <tr><td colspan="5" class="empty-cell">请先连接机器狗</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Ops Tab 3: Logs -->
+          <div class="ops-pane" id="ops-pane-logs">
+            <div class="file-toolbar">
+              <select id="ops-log-unit" style="width:230px;">
+                <option value="doso-brainstem.service">doso-brainstem.service</option>
+                <option value="doso-ota.service">doso-ota.service</option>
+                <option value="doso-cloud-link.service">doso-cloud-link.service</option>
+                <option value="doso-ops-tunnel.service">doso-ops-tunnel.service</option>
+              </select>
+              <select id="ops-log-lines" style="width:100px;">
+                <option value="100">100 行</option>
+                <option value="200">200 行</option>
+                <option value="500">500 行</option>
+              </select>
+              <input id="ops-log-keyword" type="search" placeholder="筛选关键字" style="flex:1;" />
+              <button class="btn btn-primary btn-sm" id="btn-ops-logs" type="button">拉取日志</button>
+            </div>
+            <pre class="log-box" id="ops-log-output">点击「拉取日志」查看实时输出</pre>
+          </div>
+        </section>
+
+        <!-- View 6: Settings -->
         <section class="view" id="view-settings">
           <div class="section-block">
             <div class="section-head">
@@ -323,6 +448,32 @@
                 </div>
               </div>
 
+              <div class="section-subhead">机载运维通道</div>
+              <div class="form-grid-3">
+                <div class="field">
+                  <label for="cfg-ops-host">跳板地址</label>
+                  <input id="cfg-ops-host" type="text" placeholder="47.103.89.137" />
+                </div>
+                <div class="field">
+                  <label for="cfg-ops-user">跳板用户</label>
+                  <input id="cfg-ops-user" type="text" placeholder="admin" />
+                </div>
+                <div class="field">
+                  <label for="cfg-ops-key">跳板私钥 <span class="field-status" id="cfg-ops-key-status"></span></label>
+                  <input id="cfg-ops-key" type="text" placeholder="留空自动探测本机密钥" />
+                </div>
+              </div>
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="cfg-ops-robot-user">机端用户名</label>
+                  <input id="cfg-ops-robot-user" type="text" placeholder="sunrise" />
+                </div>
+                <div class="field">
+                  <label for="cfg-ops-robot-pwd">机端密码 <span class="field-status" id="cfg-ops-pwd-status"></span></label>
+                  <input id="cfg-ops-robot-pwd" type="password" autocomplete="off" placeholder="留空保持当前配置" />
+                </div>
+              </div>
+
               <div class="form-actions">
                 <button class="btn btn-primary" type="submit">保存配置</button>
               </div>
@@ -369,7 +520,7 @@
         </div>
         <div class="field hidden" id="pub-component-wrap">
           <label for="pub-component">组件名称</label>
-          <input id="pub-component" type="text" placeholder="perception" />
+          <input id="pub-component" type="text" placeholder="voice" />
         </div>
 
         <div class="field">
@@ -475,6 +626,125 @@
         <div class="drawer-foot">
           <button class="btn btn-ghost" id="btn-pub-dryrun" type="button">仅预检</button>
           <button class="btn btn-primary" id="btn-pub-submit" type="submit">立即发布</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Slide-over Drawer: Compose Release Bundle -->
+  <div class="drawer-backdrop hidden" id="drawer-bundle">
+    <div class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-bundle-title">
+      <div class="drawer-head">
+        <h2 id="drawer-bundle-title">合成整机组合包</h2>
+        <button class="icon-btn" data-close-drawer="drawer-bundle" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form class="drawer-body" id="bundle-form">
+        <div class="field">
+          <label>选择组件版本</label>
+          <div class="checklist" id="bundle-source-list"></div>
+        </div>
+        <div class="form-grid-3">
+          <div class="field">
+            <label for="bnd-channel">渠道</label>
+            <select id="bnd-channel">
+              <option value="stable">stable</option>
+              <option value="qa">qa</option>
+              <option value="dev">dev</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="bnd-version">整机版本号</label>
+            <input id="bnd-version" type="text" placeholder="1.0.0" required />
+          </div>
+          <div class="field">
+            <label for="bnd-sequence">版本序号</label>
+            <input id="bnd-sequence" type="number" min="1" required />
+          </div>
+        </div>
+        <div class="field">
+          <label for="bnd-release-id">组合包编号</label>
+          <input id="bnd-release-id" type="text" required />
+        </div>
+        <div class="drawer-foot">
+          <button class="btn btn-ghost" data-close-drawer="drawer-bundle" type="button">取消</button>
+          <button class="btn btn-primary" type="submit">生成组合包</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Slide-over Drawer: Register / Edit Device -->
+  <div class="drawer-backdrop hidden" id="drawer-device">
+    <div class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-device-title">
+      <div class="drawer-head">
+        <h2 id="drawer-device-title">登记机器狗</h2>
+        <button class="icon-btn" data-close-drawer="drawer-device" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form class="drawer-body" id="device-upsert-form">
+        <div class="field">
+          <label for="dev-id-input">设备编号</label>
+          <input id="dev-id-input" type="text" placeholder="留空自动生成随机 UUID" />
+        </div>
+        <div class="form-grid-2">
+          <div class="field">
+            <label for="dev-model-input">型号</label>
+            <input id="dev-model-input" type="text" required />
+          </div>
+          <div class="field">
+            <label for="dev-hw-input">硬件版本</label>
+            <input id="dev-hw-input" type="text" required />
+          </div>
+        </div>
+        <div class="form-grid-2">
+          <div class="field">
+            <label for="dev-ring-input">发布分环</label>
+            <select id="dev-ring-input">
+              <option value="prod">prod</option>
+              <option value="canary">canary</option>
+              <option value="dev">dev</option>
+            </select>
+          </div>
+          <div class="field field-checkbox">
+            <label class="checkbox-label">
+              <input id="dev-enabled-input" type="checkbox" checked />
+              <span>允许接收更新</span>
+            </label>
+          </div>
+        </div>
+        <div class="field">
+          <label for="dev-tags-input">标签</label>
+          <input id="dev-tags-input" type="text" placeholder="逗号分隔，例如 dog3, rdk-s100p" />
+        </div>
+        <div class="drawer-foot" style="justify-content:space-between;">
+          <button class="btn btn-danger hidden" id="btn-dev-delete" type="button">移除设备</button>
+          <div style="display:flex;gap:8px;margin-left:auto;">
+            <button class="btn btn-ghost" data-close-drawer="drawer-device" type="button">取消</button>
+            <button class="btn btn-primary" type="submit">保存</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Slide-over Drawer: Edit Remote Text File -->
+  <div class="drawer-backdrop hidden" id="drawer-file-edit">
+    <div class="drawer drawer-wide" role="dialog" aria-modal="true" aria-labelledby="drawer-file-title">
+      <div class="drawer-head">
+        <h2 id="drawer-file-title" class="mono">编辑文件</h2>
+        <button class="icon-btn" data-close-drawer="drawer-file-edit" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form class="drawer-body" id="file-edit-form" style="display:flex;flex-direction:column;">
+        <input type="hidden" id="file-edit-path" />
+        <textarea id="file-edit-content" class="code-editor" spellcheck="false"></textarea>
+        <div class="drawer-foot">
+          <button class="btn btn-ghost" data-close-drawer="drawer-file-edit" type="button">取消</button>
+          <button class="btn btn-primary" type="submit">保存更改</button>
         </div>
       </form>
     </div>

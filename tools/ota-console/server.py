@@ -36,11 +36,13 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     WEB_DIR = _BUNDLE_ROOT / "web"
     REPO_ROOT = Path(sys.executable).resolve().parent
     OPS_SCRIPT_PATH = _BUNDLE_ROOT / "doso-ota-ops.py"
+    ROBOT_OPS_PATH = _BUNDLE_ROOT / "robot_ops.py"
 else:
     CONSOLE_DIR = Path(__file__).resolve().parent
     WEB_DIR = CONSOLE_DIR / "web"
     REPO_ROOT = CONSOLE_DIR.parent.parent
     OPS_SCRIPT_PATH = REPO_ROOT / "tools" / "deploy" / "doso-ota-ops.py"
+    ROBOT_OPS_PATH = CONSOLE_DIR / "robot_ops.py"
 
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
@@ -57,12 +59,20 @@ CONFIG_KEYS = (
     "DOSO_DEFAULT_MODEL",
     "DOSO_DEFAULT_HW_REV",
     "DOSO_SIGNING_KEY_ID",
+    "DOSO_OPS_JUMP_HOST",
+    "DOSO_OPS_JUMP_PORT",
+    "DOSO_OPS_JUMP_USER",
+    "DOSO_OPS_JUMP_KEY",
+    "DOSO_OPS_ROBOT_USER",
+    "DOSO_OPS_ROBOT_PASSWORD",
+    "DOSO_OPS_ROBOT_KEY",
 )
 SECRET_CONFIG_KEYS = frozenset(
     {
         "DOSO_RELEASE_API_TOKEN",
         "DOSO_OSS_ACCESS_KEY_ID",
         "DOSO_OSS_ACCESS_KEY_SECRET",
+        "DOSO_OPS_ROBOT_PASSWORD",
     }
 )
 DEFAULT_CONFIG: dict[str, str] = {
@@ -75,19 +85,27 @@ DEFAULT_CONFIG: dict[str, str] = {
     "DOSO_DEFAULT_MODEL": "THUNDER 01",
     "DOSO_DEFAULT_HW_REV": "rdk-s100p",
     "DOSO_SIGNING_KEY_ID": "release-key-2026-01",
+    "DOSO_OPS_JUMP_HOST": "47.103.89.137",
+    "DOSO_OPS_JUMP_PORT": "22",
+    "DOSO_OPS_JUMP_USER": "admin",
+    "DOSO_OPS_JUMP_KEY": "",
+    "DOSO_OPS_ROBOT_USER": "sunrise",
+    "DOSO_OPS_ROBOT_PASSWORD": "",
+    "DOSO_OPS_ROBOT_KEY": "",
 }
 
 
-def load_ops_module() -> Any:
-    spec = importlib.util.spec_from_file_location("doso_ota_ops", OPS_SCRIPT_PATH)
+def load_module_from_path(name: str, path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {OPS_SCRIPT_PATH}")
+        raise RuntimeError(f"cannot load {path}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-ops = load_ops_module()
+ops = load_module_from_path("doso_ota_ops", OPS_SCRIPT_PATH)
+robot_ops = load_module_from_path("doso_robot_ops", ROBOT_OPS_PATH)
 
 
 def default_config_path() -> Path:
@@ -167,6 +185,8 @@ class ConfigStore:
         token = cfg["DOSO_RELEASE_API_TOKEN"]
         ak_id = cfg["DOSO_OSS_ACCESS_KEY_ID"]
         ak_secret = cfg["DOSO_OSS_ACCESS_KEY_SECRET"]
+        robot_pwd = cfg["DOSO_OPS_ROBOT_PASSWORD"]
+        jump_key_auto = (Path.home() / ".ssh" / "inovxio_deploy").is_file()
         return {
             "cloudUrl": cfg["DOSO_OTA_CLOUD_URL"],
             "ossBucket": cfg["DOSO_OSS_BUCKET"],
@@ -181,6 +201,15 @@ class ConfigStore:
             "ossAkSecretConfigured": bool(ak_secret),
             "ossAkSecretPreview": mask_secret(ak_secret),
             "ossConfigured": bool(ak_id and ak_secret and cfg["DOSO_OSS_BUCKET"] and cfg["DOSO_OSS_ENDPOINT"]),
+            "opsJumpHost": cfg["DOSO_OPS_JUMP_HOST"],
+            "opsJumpPort": cfg["DOSO_OPS_JUMP_PORT"],
+            "opsJumpUser": cfg["DOSO_OPS_JUMP_USER"],
+            "opsJumpKey": cfg["DOSO_OPS_JUMP_KEY"],
+            "opsJumpKeyReady": bool(cfg["DOSO_OPS_JUMP_KEY"] or jump_key_auto),
+            "opsRobotUser": cfg["DOSO_OPS_ROBOT_USER"],
+            "opsRobotKey": cfg["DOSO_OPS_ROBOT_KEY"],
+            "opsRobotPasswordConfigured": bool(robot_pwd),
+            "opsRobotPasswordPreview": mask_secret(robot_pwd),
         }
 
     def update(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -193,6 +222,12 @@ class ConfigStore:
                 "defaultModel": "DOSO_DEFAULT_MODEL",
                 "defaultHardwareRevision": "DOSO_DEFAULT_HW_REV",
                 "signingKeyId": "DOSO_SIGNING_KEY_ID",
+                "opsJumpHost": "DOSO_OPS_JUMP_HOST",
+                "opsJumpPort": "DOSO_OPS_JUMP_PORT",
+                "opsJumpUser": "DOSO_OPS_JUMP_USER",
+                "opsJumpKey": "DOSO_OPS_JUMP_KEY",
+                "opsRobotUser": "DOSO_OPS_ROBOT_USER",
+                "opsRobotKey": "DOSO_OPS_ROBOT_KEY",
             }
             for json_key, env_key in field_map.items():
                 if json_key in payload and payload[json_key] is not None:
@@ -201,13 +236,14 @@ class ConfigStore:
                         if not val.startswith(("http://", "https://")):
                             raise ops.OpsError("云端地址必须以 http:// 或 https:// 开头")
                         val = val.rstrip("/")
-                    if val:
+                    if val or env_key in ("DOSO_OPS_JUMP_KEY", "DOSO_OPS_ROBOT_KEY"):
                         next_vals[env_key] = val
 
             secret_map = {
                 "apiToken": ("DOSO_RELEASE_API_TOKEN", "clearApiToken"),
                 "ossAccessKeyId": ("DOSO_OSS_ACCESS_KEY_ID", "clearOssCredentials"),
                 "ossAccessKeySecret": ("DOSO_OSS_ACCESS_KEY_SECRET", "clearOssCredentials"),
+                "opsRobotPassword": ("DOSO_OPS_ROBOT_PASSWORD", "clearOpsRobotPassword"),
             }
             for json_key, (env_key, clear_flag) in secret_map.items():
                 if payload.get(clear_flag):
@@ -608,6 +644,7 @@ class ConsoleContext:
             "authOk": False,
             "releasesApiReady": False,
             "devices": [],
+            "registeredDevices": [],
             "releases": [],
             "rollouts": [],
             "android": {ch: None for ch in ANDROID_CHANNELS},
@@ -629,7 +666,7 @@ class ConsoleContext:
                 return None, None, str(exc)
 
         tracked_list = self.jobs.list_items()
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=9) as pool:
             f_health = pool.submit(_safe_get, "/health", False, 8)
             f_android = {
                 ch: pool.submit(
@@ -641,6 +678,7 @@ class ConsoleContext:
                 for ch in ANDROID_CHANNELS
             }
             f_dev = pool.submit(_safe_get, "/v1/devices/status", True, 12) if token else None
+            f_reg = pool.submit(_safe_get, "/v1/devices", True, 12) if token else None
             f_rel = pool.submit(_safe_get, "/v1/releases", True, 12) if token else None
             f_ro = pool.submit(_safe_get, "/v1/rollouts", True, 12) if token else None
             f_jobs = [
@@ -681,6 +719,10 @@ class ConsoleContext:
                 return out
             else:
                 out["warnings"].append(f"读取设备状态失败 (HTTP {st_d})")
+
+            st_reg, body_reg, _ = f_reg.result()  # type: ignore[union-attr]
+            if st_reg == 200 and isinstance(body_reg, list):
+                out["registeredDevices"] = body_reg
 
             st_r, body_r, err_r = f_rel.result()  # type: ignore[union-attr]
             if err_r:
@@ -1171,6 +1213,10 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/local-artifacts":
                     self._send_json(HTTPStatus.OK, detect_local_artifacts())
                     return
+                if path == "/api/ops/tunnels":
+                    cfg = ctx.config_store.effective()
+                    self._send_json(HTTPStatus.OK, robot_ops.discover_tunnels(cfg))
+                    return
 
                 m_dev_rel = re.fullmatch(r"/api/devices/([^/]+)/releases", path)
                 if m_dev_rel:
@@ -1208,7 +1254,7 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     return
 
                 self._serve_static(path)
-            except ops.OpsError as exc:
+            except (ops.OpsError, robot_ops.RobotOpsError) as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
@@ -1246,6 +1292,178 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
 
                 if path == "/api/releases/publish":
                     res = ctx.publish_robot_release(body)
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/releases/bundle":
+                    cfg = ctx.config_store.effective()
+                    token = ctx._require_token(cfg)
+                    release_id = ops.validate_release_id(str(body.get("releaseId", "")))
+                    version = ops.validate_semver(str(body.get("version", "")))
+                    sequence = int(body.get("sequence", 0))
+                    if sequence <= 0:
+                        raise ops.OpsError("版本序号必须大于 0")
+                    channel = str(body.get("channel", "stable")).strip()
+                    src_ids = [str(s).strip() for s in (body.get("sourceReleaseIds") or []) if str(s).strip()]
+                    if not src_ids:
+                        raise ops.OpsError("请至少勾选 1 个组件版本")
+                    bundle_payload = {
+                        "releaseId": release_id,
+                        "version": version,
+                        "sequence": sequence,
+                        "channel": channel,
+                        "sourceReleaseIds": src_ids,
+                        "minimumBootloaderVersion": str(body.get("minBootloader") or "1.0.0").strip(),
+                        "minimumBrainstemVersion": str(body.get("minBrainstem") or "0.0.1").strip(),
+                        "minimumBatteryPercent": int(body.get("minBattery", 20)),
+                        "healthTimeoutMs": int(body.get("healthTimeoutMs", 30000)),
+                    }
+                    st_b, rel = ops.api_call(
+                        cfg["DOSO_OTA_CLOUD_URL"],
+                        "POST",
+                        "/v1/releases/bundle",
+                        token,
+                        body=bundle_payload,
+                    )
+                    self._send_json(HTTPStatus.CREATED if st_b == 201 else HTTPStatus.OK, rel)
+                    return
+
+                if path == "/api/devices/upsert":
+                    cfg = ctx.config_store.effective()
+                    token = ctx._require_token(cfg)
+                    raw_id = str(body.get("deviceId") or "").strip()
+                    dev_id = ops.validate_device_id(raw_id) if raw_id else str(uuid.uuid4())
+                    tags_raw = body.get("tags", [])
+                    if isinstance(tags_raw, str):
+                        tags = [t.strip() for t in re.split(r"[,，\s]+", tags_raw) if t.strip()]
+                    elif isinstance(tags_raw, list):
+                        tags = [str(t).strip() for t in tags_raw if str(t).strip()]
+                    else:
+                        tags = []
+                    dev_payload = {
+                        "model": str(body.get("model") or cfg["DOSO_DEFAULT_MODEL"]).strip(),
+                        "hardwareRevision": str(body.get("hardwareRevision") or cfg["DOSO_DEFAULT_HW_REV"]).strip(),
+                        "enabled": bool(body.get("enabled", True)),
+                        "ring": str(body.get("ring") or "prod").strip(),
+                        "tags": tags,
+                    }
+                    _, saved = ops.api_call(
+                        cfg["DOSO_OTA_CLOUD_URL"],
+                        "PUT",
+                        f"/v1/devices/{urllib.parse.quote(dev_id)}",
+                        token,
+                        body=dev_payload,
+                    )
+                    self._send_json(HTTPStatus.OK, saved)
+                    return
+
+                m_dev_del = re.fullmatch(r"/api/devices/([^/]+)/delete", path)
+                if m_dev_del:
+                    cfg = ctx.config_store.effective()
+                    token = ctx._require_token(cfg)
+                    dev_id = ops.validate_device_id(urllib.parse.unquote(m_dev_del.group(1)))
+                    _, deleted = ops.api_call(
+                        cfg["DOSO_OTA_CLOUD_URL"],
+                        "DELETE",
+                        f"/v1/devices/{urllib.parse.quote(dev_id)}",
+                        token,
+                    )
+                    self._send_json(HTTPStatus.OK, deleted)
+                    return
+
+                if path == "/api/ops/status":
+                    cfg = ctx.config_store.effective()
+                    self._send_json(HTTPStatus.OK, robot_ops.get_robot_status(cfg, body.get("target") or {}))
+                    return
+
+                if path == "/api/ops/service":
+                    cfg = ctx.config_store.effective()
+                    res = robot_ops.control_service(
+                        cfg,
+                        body.get("target") or {},
+                        str(body.get("unit") or ""),
+                        str(body.get("action") or ""),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/ops/logs":
+                    cfg = ctx.config_store.effective()
+                    res = robot_ops.get_service_logs(
+                        cfg,
+                        body.get("target") or {},
+                        str(body.get("unit") or ""),
+                        int(body.get("lines") or 100),
+                        str(body.get("keyword") or ""),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/ops/files/list":
+                    cfg = ctx.config_store.effective()
+                    res = robot_ops.list_dir(cfg, body.get("target") or {}, str(body.get("path") or "/opt/doso"))
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/ops/files/read":
+                    cfg = ctx.config_store.effective()
+                    res = robot_ops.read_text_file(cfg, body.get("target") or {}, str(body.get("path") or ""))
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/ops/files/write":
+                    cfg = ctx.config_store.effective()
+                    res = robot_ops.write_text_file(
+                        cfg,
+                        body.get("target") or {},
+                        str(body.get("path") or ""),
+                        str(body.get("content") or ""),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/ops/files/upload":
+                    cfg = ctx.config_store.effective()
+                    local_path, orig_name = ctx.uploads.resolve_record(str(body.get("uploadId") or "").strip())
+                    res = robot_ops.upload_file(
+                        cfg,
+                        body.get("target") or {},
+                        str(body.get("remoteDir") or "/tmp"),
+                        local_path,
+                        str(body.get("filename") or orig_name),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/ops/files/download":
+                    cfg = ctx.config_store.effective()
+                    fname, data = robot_ops.download_file_bytes(
+                        cfg, body.get("target") or {}, str(body.get("path") or "")
+                    )
+                    try:
+                        self.send_response(HTTPStatus.OK)
+                        self._send_security_headers()
+                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header(
+                            "Content-Disposition",
+                            f"attachment; filename*=UTF-8''{urllib.parse.quote(fname)}",
+                        )
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        pass
+                    return
+
+                if path == "/api/ops/files/mkdir":
+                    cfg = ctx.config_store.effective()
+                    res = robot_ops.make_dir(cfg, body.get("target") or {}, str(body.get("path") or ""))
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/ops/files/delete":
+                    cfg = ctx.config_store.effective()
+                    res = robot_ops.delete_path(cfg, body.get("target") or {}, str(body.get("path") or ""))
                     self._send_json(HTTPStatus.OK, res)
                     return
 
@@ -1336,7 +1554,7 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     return
 
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown_api"})
-            except ops.OpsError as exc:
+            except (ops.OpsError, robot_ops.RobotOpsError) as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except ValueError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
