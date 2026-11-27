@@ -41,6 +41,9 @@ use uuid::Uuid;
 
 type HmacSha1 = Hmac<Sha1>;
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+/// Backdate signed manifest `issuedAtMs` slightly so robots whose clocks lag the cloud
+/// server by small NTP drift do not reject freshly dispatched manifests as not-yet-valid.
+const MANIFEST_CLOCK_SKEW_LEEWAY_MS: i64 = 60_000;
 
 fn default_ring() -> String {
     "prod".into()
@@ -1531,7 +1534,7 @@ fn build_signed_envelope(
         default_ttl_ms
     };
     let now_secs = now_ms / 1000;
-    template.manifest.issued_at_ms = now_ms;
+    template.manifest.issued_at_ms = now_ms.saturating_sub(MANIFEST_CLOCK_SKEW_LEEWAY_MS);
     template.manifest.expires_at_ms = now_ms.saturating_add(ttl_ms);
     template.manifest.key_id = config.signing_key_id.clone();
 
@@ -1918,9 +1921,15 @@ mod tests {
         let job: Job = serde_json::from_slice(&body).unwrap();
         let manifest = job.manifest.decode(&key.verifying_key()).unwrap();
 
-        // Bug 2: manifest issuedAtMs/expiresAtMs refreshed dynamically preserving 600_000ms TTL.
-        assert!(manifest.issued_at_ms >= before_ms && manifest.issued_at_ms <= after_ms);
-        assert_eq!(manifest.expires_at_ms - manifest.issued_at_ms, 600_000);
+        // Bug 2: manifest issuedAtMs/expiresAtMs refreshed dynamically with clock-skew leeway.
+        assert!(
+            manifest.issued_at_ms >= before_ms - MANIFEST_CLOCK_SKEW_LEEWAY_MS
+                && manifest.issued_at_ms <= after_ms - MANIFEST_CLOCK_SKEW_LEEWAY_MS
+        );
+        assert!(
+            manifest.expires_at_ms >= before_ms + 600_000
+                && manifest.expires_at_ms <= after_ms + 600_000
+        );
         assert_eq!(manifest.key_id, "release-key-2026-01");
 
         // Bug 1: OSS URL Expires must be ~10-digit Unix seconds (now_sec + 1800), never milliseconds!

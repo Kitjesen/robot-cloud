@@ -30,10 +30,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-CONSOLE_DIR = Path(__file__).resolve().parent
-WEB_DIR = CONSOLE_DIR / "web"
-REPO_ROOT = CONSOLE_DIR.parent.parent
-OPS_SCRIPT_PATH = REPO_ROOT / "tools" / "deploy" / "doso-ota-ops.py"
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    _BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS"))
+    CONSOLE_DIR = _BUNDLE_ROOT
+    WEB_DIR = _BUNDLE_ROOT / "web"
+    REPO_ROOT = Path(sys.executable).resolve().parent
+    OPS_SCRIPT_PATH = _BUNDLE_ROOT / "doso-ota-ops.py"
+else:
+    CONSOLE_DIR = Path(__file__).resolve().parent
+    WEB_DIR = CONSOLE_DIR / "web"
+    REPO_ROOT = CONSOLE_DIR.parent.parent
+    OPS_SCRIPT_PATH = REPO_ROOT / "tools" / "deploy" / "doso-ota-ops.py"
 
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
@@ -1364,7 +1371,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8190)
     parser.add_argument("--config", type=Path, help="自定义本地配置文件路径")
-    parser.add_argument("--open", dest="open_browser", action="store_true", help="启动后自动打开浏览器")
+    parser.add_argument(
+        "--open",
+        dest="open_browser",
+        action="store_true",
+        default=bool(getattr(sys, "frozen", False)),
+        help="启动后自动打开浏览器",
+    )
+    parser.add_argument("--no-open", dest="open_browser", action="store_false", help="启动时不自动打开浏览器")
     parser.add_argument("--allow-remote", action="store_true", help="允许非回环 Host 访问（仅反向代理场景）")
     args = parser.parse_args(argv)
 
@@ -1384,6 +1398,8 @@ def main(argv: list[str] | None = None) -> int:
     actual_port = server.server_address[1]
     actual_url = f"http://{args.host}:{actual_port}/"
     print(f"DOSO OTA 管理台已启动: {actual_url}", flush=True)
+    if getattr(sys, "frozen", False):
+        print("关闭此窗口即可停止本地服务。", flush=True)
     if args.open_browser:
         threading.Timer(0.35, lambda: webbrowser.open(actual_url)).start()
     try:

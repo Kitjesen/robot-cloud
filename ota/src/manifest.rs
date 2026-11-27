@@ -227,8 +227,10 @@ impl Manifest {
             matches!(self.channel.as_str(), "dev" | "qa" | "stable"),
             "release_channel_invalid"
         );
+        const ISSUED_AT_SKEW_LEEWAY_MS: i64 = 60_000;
         ensure!(
-            self.issued_at_ms <= now_ms && self.expires_at_ms > now_ms,
+            self.issued_at_ms <= now_ms.saturating_add(ISSUED_AT_SKEW_LEEWAY_MS)
+                && self.expires_at_ms > now_ms,
             "manifest_expired"
         );
         ensure!(
