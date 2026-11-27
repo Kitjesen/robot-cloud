@@ -72,15 +72,15 @@ pub struct DeviceRecord {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReleaseTemplate {
     pub manifest: Manifest,
     #[serde(default)]
     pub object_key: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bundle_object_keys: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta_object_key: Option<String>,
 }
 
@@ -293,6 +293,7 @@ struct AppState {
     config: Config,
     expected_token_hash: [u8; 32],
     signing_key: Arc<SigningKey>,
+    releases_lock: Arc<Mutex<()>>,
     jobs: Arc<Mutex<HashMap<String, Job>>>,
     rollouts: Arc<Mutex<HashMap<String, RolloutCampaign>>>,
 }
@@ -323,10 +324,15 @@ pub fn build_router(config: Config) -> Result<Router> {
         config,
         expected_token_hash,
         signing_key: Arc::new(signing_key),
+        releases_lock: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(jobs)),
         rollouts: Arc::new(Mutex::new(rollouts)),
     };
     let protected = Router::new()
+        .route(
+            "/v1/releases",
+            post(register_release).get(list_all_releases),
+        )
         .route(
             "/v1/apps/android/releases",
             post(publish_android_app_release),
@@ -654,6 +660,216 @@ async fn list_device_statuses(State(state): State<AppState>) -> Response {
     }
     items.sort_by(|a, b| a.device_id.cmp(&b.device_id));
     (StatusCode::OK, Json(items)).into_response()
+}
+
+fn summary_from_manifest(manifest: &Manifest) -> ReleaseSummary {
+    ReleaseSummary {
+        release_id: manifest.release_id.clone(),
+        version: manifest.version.clone(),
+        sequence: manifest.sequence,
+        channel: manifest.channel.clone(),
+        model: manifest.model.clone(),
+        hardware_revision: manifest.hardware_revision.clone(),
+        artifact_size_bytes: manifest.artifact_size_bytes,
+        artifact_sha256: manifest.artifact_sha256.clone(),
+        artifact_type: manifest.artifact_type,
+        policy_slot: manifest.policy_slot.clone(),
+        component: manifest.component.clone(),
+    }
+}
+
+fn is_hex64(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn validate_oss_object_key(raw: &str) -> Result<String> {
+    let key = raw.trim().trim_start_matches('/');
+    ensure!(
+        !key.is_empty()
+            && key.len() <= 512
+            && !key.contains("..")
+            && !key.contains('?')
+            && !key.contains('#')
+            && !key.contains('\\')
+            && !key.chars().any(|c| c.is_control()),
+        "oss_object_key_invalid"
+    );
+    Ok(key.to_string())
+}
+
+fn validate_and_normalize_release_template(
+    mut template: ReleaseTemplate,
+    config: &Config,
+) -> Result<ReleaseTemplate> {
+    let clean_id = validate_release_id(&template.manifest.release_id)?.to_string();
+    template.manifest.release_id = clean_id;
+
+    ensure!(
+        template.manifest.manifest_version == 1,
+        "manifest_version_unsupported"
+    );
+    ensure!(
+        matches!(template.manifest.channel.as_str(), "dev" | "qa" | "stable"),
+        "release_channel_invalid"
+    );
+    ensure!(template.manifest.sequence > 0, "release_sequence_invalid");
+    ensure!(
+        !template.manifest.version.trim().is_empty()
+            && !template.manifest.model.trim().is_empty()
+            && !template.manifest.hardware_revision.trim().is_empty()
+            && !template
+                .manifest
+                .minimum_bootloader_version
+                .trim()
+                .is_empty()
+            && !template
+                .manifest
+                .minimum_brainstem_version
+                .trim()
+                .is_empty(),
+        "release_metadata_invalid"
+    );
+    ensure!(
+        template.manifest.rollback_policy.mode == "automatic"
+            && template.manifest.rollback_policy.health_timeout_ms > 0,
+        "rollback_policy_invalid"
+    );
+    if template.manifest.key_id.trim().is_empty() {
+        template.manifest.key_id = config.signing_key_id.clone();
+    }
+
+    match template.manifest.artifact_type {
+        ArtifactType::ReleaseBundle => {
+            ensure!(
+                !template.manifest.bundle_items.is_empty(),
+                "bundle_items_empty"
+            );
+            template.object_key.clear();
+            let mut normalized_keys = BTreeMap::new();
+            for (k, v) in &template.bundle_object_keys {
+                normalized_keys.insert(k.trim().to_string(), validate_oss_object_key(v)?);
+            }
+            for item in &mut template.manifest.bundle_items {
+                ensure!(
+                    !item.component.trim().is_empty()
+                        && item.component.trim() != "ota"
+                        && !item.version.trim().is_empty()
+                        && item.artifact_size_bytes > 0
+                        && is_hex64(&item.artifact_sha256),
+                    "bundle_item_invalid"
+                );
+                item.artifact_sha256 = item.artifact_sha256.to_ascii_lowercase();
+                let key = normalized_keys
+                    .get(&item.component)
+                    .context("bundle_object_key_missing")?;
+                let _ = oss_signed_url(config, key, 1_700_000_000)?;
+                if item.delta.is_some() {
+                    let delta_key = normalized_keys
+                        .get(&format!("{}:delta", item.component))
+                        .context("bundle_delta_object_key_missing")?;
+                    let _ = oss_signed_url(config, delta_key, 1_700_000_000)?;
+                }
+            }
+            template.bundle_object_keys = normalized_keys;
+        }
+        ArtifactType::BrainstemRelease
+        | ArtifactType::PolicyPackage
+        | ArtifactType::ComponentRelease => {
+            let key = validate_oss_object_key(&template.object_key)?;
+            let _ = oss_signed_url(config, &key, 1_700_000_000)?;
+            template.object_key = key;
+            ensure!(
+                template.manifest.artifact_size_bytes > 0
+                    && is_hex64(&template.manifest.artifact_sha256),
+                "release_artifact_invalid"
+            );
+            template.manifest.artifact_sha256 =
+                template.manifest.artifact_sha256.to_ascii_lowercase();
+            if template.manifest.artifact_type == ArtifactType::PolicyPackage {
+                ensure!(
+                    template
+                        .manifest
+                        .policy_slot
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty()),
+                    "policy_slot_missing"
+                );
+            }
+            if template.manifest.artifact_type == ArtifactType::ComponentRelease {
+                ensure!(
+                    template
+                        .manifest
+                        .component
+                        .as_deref()
+                        .is_some_and(|c| !c.trim().is_empty() && c.trim() != "ota"),
+                    "component_invalid"
+                );
+            }
+        }
+    }
+
+    if let Some(delta_key) = template.delta_object_key.take() {
+        let trimmed = delta_key.trim();
+        if !trimmed.is_empty() {
+            let normalized = validate_oss_object_key(trimmed)?;
+            let _ = oss_signed_url(config, &normalized, 1_700_000_000)?;
+            template.delta_object_key = Some(normalized);
+        }
+    }
+
+    Ok(template)
+}
+
+async fn register_release(
+    State(state): State<AppState>,
+    Json(request): Json<ReleaseTemplate>,
+) -> Response {
+    let normalized = match validate_and_normalize_release_template(request, &state.config) {
+        Ok(tpl) => tpl,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let release_id = normalized.manifest.release_id.clone();
+    let template_path = state
+        .config
+        .root
+        .join("releases")
+        .join(&release_id)
+        .join("manifest.template.json");
+
+    let _guard = state.releases_lock.lock().await;
+    if template_path.is_file() {
+        match fs::read(&template_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ReleaseTemplate>(&bytes).ok())
+        {
+            Some(existing)
+                if serde_json::to_value(&existing).ok()
+                    == serde_json::to_value(&normalized).ok() =>
+            {
+                return (
+                    StatusCode::OK,
+                    Json(summary_from_manifest(&existing.manifest)),
+                )
+                    .into_response();
+            }
+            _ => return error_response(StatusCode::CONFLICT, "release_already_exists"),
+        }
+    }
+    if let Err(error) = atomic_write_json(&template_path, &normalized) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    (
+        StatusCode::CREATED,
+        Json(summary_from_manifest(&normalized.manifest)),
+    )
+        .into_response()
+}
+
+async fn list_all_releases(State(state): State<AppState>) -> Response {
+    match load_all_releases(&state.config.root) {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
 }
 
 async fn releases(State(state): State<AppState>, Path(device_id): Path<String>) -> Response {
@@ -1384,6 +1600,32 @@ async fn require_bearer_auth(
     }
 }
 
+fn load_all_releases(root: &FsPath) -> Result<Vec<ReleaseSummary>> {
+    let mut output = Vec::new();
+    let releases_dir = root.join("releases");
+    if !releases_dir.exists() {
+        return Ok(output);
+    }
+    for entry in fs::read_dir(releases_dir)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path().join("manifest.template.json");
+        if !path.is_file() {
+            continue;
+        }
+        let template: ReleaseTemplate = serde_json::from_slice(&fs::read(path)?)?;
+        output.push(summary_from_manifest(&template.manifest));
+    }
+    output.sort_by(|a, b| {
+        a.sequence
+            .cmp(&b.sequence)
+            .then_with(|| a.release_id.cmp(&b.release_id))
+    });
+    Ok(output)
+}
+
 fn load_releases(root: &FsPath, device: &DeviceRecord) -> Result<Vec<ReleaseSummary>> {
     let mut output = Vec::new();
     let releases_dir = root.join("releases");
@@ -1403,19 +1645,7 @@ fn load_releases(root: &FsPath, device: &DeviceRecord) -> Result<Vec<ReleaseSumm
         if template.manifest.model == device.model
             && template.manifest.hardware_revision == device.hardware_revision
         {
-            output.push(ReleaseSummary {
-                release_id: template.manifest.release_id,
-                version: template.manifest.version,
-                sequence: template.manifest.sequence,
-                channel: template.manifest.channel,
-                model: template.manifest.model,
-                hardware_revision: template.manifest.hardware_revision,
-                artifact_size_bytes: template.manifest.artifact_size_bytes,
-                artifact_sha256: template.manifest.artifact_sha256,
-                artifact_type: template.manifest.artifact_type,
-                policy_slot: template.manifest.policy_slot,
-                component: template.manifest.component,
-            });
+            output.push(summary_from_manifest(&template.manifest));
         }
     }
     output.sort_by_key(|release| release.sequence);
@@ -3168,6 +3398,7 @@ mod tests {
         let app = build_router(config).unwrap();
 
         let post_paths = [
+            "/v1/releases",
             "/v1/rollouts",
             "/v1/devices/dev-1/firmware/jobs",
             "/v1/apps/android/releases",
@@ -3238,5 +3469,204 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r_android.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn register_release_persists_lists_dispatches_and_enforces_immutability() {
+        let dir = TestDir::new();
+        let (config, key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "dev-1": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true }
+            }),
+            base_template_manifest("rel-seed", 0, 0),
+            "firmware/qa/rel-seed/brainstem.tar.gz",
+            "rel-seed",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        let body_json = serde_json::json!({
+            "manifest": base_template_manifest("rel-http-004", 0, 1_800_000),
+            "objectKey": "/firmware/qa/rel-http-004/brainstem.tar.gz"
+        });
+
+        // 1. Register new release -> 201 Created.
+        let r_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body_json).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_create.status(), StatusCode::CREATED);
+        let created: ReleaseSummary = serde_json::from_slice(
+            &axum::body::to_bytes(r_create.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(created.release_id, "rel-http-004");
+        assert_eq!(created.sequence, 7);
+
+        // 2. Idempotent retry with identical payload -> 200 OK.
+        let r_retry = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body_json).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_retry.status(), StatusCode::OK);
+
+        // 3. Mutating an existing releaseId -> 409 Conflict (immutability).
+        let mut tampered = body_json.clone();
+        tampered["manifest"]["artifactSha256"] =
+            serde_json::json!(Manifest::artifact_hash(b"different-bytes"));
+        let r_conflict = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&tampered).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_conflict.status(), StatusCode::CONFLICT);
+
+        // 4. Listed by GET /v1/releases and immediately dispatchable to dev-1.
+        let r_list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_list.status(), StatusCode::OK);
+        let all: Vec<ReleaseSummary> = serde_json::from_slice(
+            &axum::body::to_bytes(r_list.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(all.iter().any(|r| r.release_id == "rel-http-004"));
+
+        let r_job = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/devices/dev-1/firmware/jobs")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "releaseId": "rel-http-004",
+                            "idempotencyKey": "idem-http-004"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_job.status(), StatusCode::ACCEPTED);
+        let job: Job = serde_json::from_slice(
+            &axum::body::to_bytes(r_job.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let decoded = job.manifest.decode(&key.verifying_key()).unwrap();
+        assert_eq!(decoded.release_id, "rel-http-004");
+        assert!(
+            decoded
+                .artifact_url
+                .contains("/firmware/qa/rel-http-004/brainstem.tar.gz?")
+        );
+    }
+
+    #[tokio::test]
+    async fn register_release_rejects_traversal_and_invalid_fields() {
+        let dir = TestDir::new();
+        let (config, _key) = write_test_env(
+            dir.path(),
+            serde_json::json!({}),
+            base_template_manifest("rel-seed", 0, 0),
+            "firmware/qa/rel-seed/brainstem.tar.gz",
+            "rel-seed",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        let bad_cases = vec![
+            serde_json::json!({
+                "manifest": base_template_manifest("../escape", 0, 0),
+                "objectKey": "firmware/qa/x/a.tar.gz"
+            }),
+            serde_json::json!({
+                "manifest": base_template_manifest("rel-bad-key", 0, 0),
+                "objectKey": "firmware/../../secret"
+            }),
+            serde_json::json!({
+                "manifest": {
+                    "manifestVersion": 1,
+                    "releaseId": "rel-bad-sha",
+                    "channel": "qa",
+                    "sequence": 1,
+                    "version": "0.0.4",
+                    "issuedAtMs": 0,
+                    "expiresAtMs": 0,
+                    "model": "THUNDER 01",
+                    "hardwareRevision": "rdk-s100p",
+                    "minimumBootloaderVersion": "1.0.0",
+                    "minimumBrainstemVersion": "1.0.0",
+                    "minimumBatteryPercent": 20,
+                    "artifactUrl": "",
+                    "artifactSizeBytes": 100,
+                    "artifactSha256": "not-a-sha",
+                    "keyId": "k",
+                    "rollbackPolicy": { "mode": "automatic", "healthTimeoutMs": 15000 }
+                },
+                "objectKey": "firmware/qa/rel-bad-sha/a.tar.gz"
+            }),
+        ];
+
+        for payload in bad_cases {
+            let r = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/releases")
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        }
     }
 }

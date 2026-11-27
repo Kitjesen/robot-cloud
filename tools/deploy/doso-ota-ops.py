@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -710,83 +711,158 @@ def cmd_package(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_oss_upload(args: argparse.Namespace) -> int:
-    if not args.file.is_file():
-        raise OpsError(f"file not found: {args.file}")
-    object_key = args.object_key.lstrip("/")
-    if not object_key:
-        raise OpsError("object_key must be non-empty")
-    sha256, size = sha256_file(args.file)
-    md5_b64, _ = md5_b64_file(args.file)
+TERMINAL_JOB_PHASES = frozenset({"succeeded", "failed", "rolled_back", "recovery_required", "cancelled"})
 
-    if args.dry_run:
+
+def default_robot_object_key(
+    artifact_type: str,
+    channel: str,
+    release_id: str,
+    policy_slot: str | None = None,
+    component: str | None = None,
+) -> str:
+    clean_id = validate_release_id(release_id)
+    if artifact_type == "policy_package":
+        slot = (policy_slot or "policy").strip()
+        return f"policies/{channel}/{clean_id}/{slot}.tar.gz"
+    if artifact_type == "component_release":
+        comp = validate_component_name(component or "")
+        return f"components/{comp}/{channel}/{clean_id}/{comp}.tar.gz"
+    return f"firmware/{channel}/{clean_id}/brainstem.tar.gz"
+
+
+def default_android_object_key(channel: str, version_name: str, version_code: int) -> str:
+    clean_ver = validate_semver(version_name, "versionName")
+    clean_channel = channel.strip()
+    if not clean_channel:
+        raise OpsError("channel must be non-empty")
+    return f"apps/android/{clean_channel}/{clean_ver}/doso-{clean_ver}-vc{version_code}.apk"
+
+
+def upload_to_oss(
+    file_path: Path,
+    object_key: str,
+    bucket: str,
+    endpoint: str,
+    content_type: str,
+    overwrite: bool = False,
+    dry_run: bool = False,
+    ak_id: str | None = None,
+    ak_secret: str | None = None,
+) -> dict[str, Any]:
+    if not file_path.is_file():
+        raise OpsError(f"file not found: {file_path}")
+    clean_key = object_key.lstrip("/")
+    if not clean_key:
+        raise OpsError("object_key must be non-empty")
+    sha256, size = sha256_file(file_path)
+    md5_b64, _ = md5_b64_file(file_path)
+
+    resolved_ak_id = (ak_id if ak_id is not None else os.environ.get("DOSO_OSS_ACCESS_KEY_ID", "")).strip()
+    resolved_ak_secret = (
+        ak_secret if ak_secret is not None else os.environ.get("DOSO_OSS_ACCESS_KEY_SECRET", "")
+    ).strip()
+
+    if dry_run:
         date_hdr = formatdate(usegmt=True)
         auth = sign_oss_header(
             method="PUT",
-            bucket=args.bucket,
-            object_key=object_key,
-            ak_id=os.environ.get("DOSO_OSS_ACCESS_KEY_ID", "DRY_RUN_AK"),
-            ak_secret=os.environ.get("DOSO_OSS_ACCESS_KEY_SECRET", "DRY_RUN_SK"),
+            bucket=bucket,
+            object_key=clean_key,
+            ak_id=resolved_ak_id or "DRY_RUN_AK",
+            ak_secret=resolved_ak_secret or "DRY_RUN_SK",
             date_hdr=date_hdr,
             content_md5=md5_b64,
-            content_type=args.content_type,
+            content_type=content_type,
         )
-        print(
-            json.dumps(
-                {
-                    "dryRun": True,
-                    "url": f"https://{args.bucket}.{args.endpoint}/{object_key}",
-                    "sizeBytes": size,
-                    "sha256": sha256,
-                    "contentMd5": md5_b64,
-                    "authScheme": auth.split(" ", 1)[0],
-                },
-                indent=2,
-            )
-        )
-        return 0
+        return {
+            "dryRun": True,
+            "url": f"https://{bucket}.{endpoint}/{clean_key}",
+            "objectKey": clean_key,
+            "sizeBytes": size,
+            "sha256": sha256,
+            "contentMd5": md5_b64,
+            "authScheme": auth.split(" ", 1)[0],
+        }
 
-    ak_id = os.environ.get("DOSO_OSS_ACCESS_KEY_ID", "").strip()
-    ak_secret = os.environ.get("DOSO_OSS_ACCESS_KEY_SECRET", "").strip()
-    if not ak_id or not ak_secret:
+    if not resolved_ak_id or not resolved_ak_secret:
         raise OpsError("set DOSO_OSS_ACCESS_KEY_ID and DOSO_OSS_ACCESS_KEY_SECRET in environment")
 
-    if not args.overwrite:
+    if not overwrite:
         head_status, head_headers, _ = oss_request(
-            "HEAD", args.bucket, args.endpoint, object_key, ak_id, ak_secret
+            "HEAD", bucket, endpoint, clean_key, resolved_ak_id, resolved_ak_secret
         )
         if head_status == 200:
             raise OpsError(
-                f"immutable OSS object already exists ({object_key}, size={head_headers.get('content-length')}); pass --overwrite only if replacing an unpublished object"
+                f"immutable OSS object already exists ({clean_key}, size={head_headers.get('content-length')}); pass --overwrite only if replacing an unpublished object"
             )
         if head_status != 404:
-            raise OpsError(f"OSS HEAD {object_key} returned unexpected HTTP {head_status}")
+            raise OpsError(f"OSS HEAD {clean_key} returned unexpected HTTP {head_status}")
 
     status, headers, body = oss_request(
         "PUT",
-        args.bucket,
-        args.endpoint,
-        object_key,
-        ak_id,
-        ak_secret,
-        body_path=args.file,
-        content_type=args.content_type,
+        bucket,
+        endpoint,
+        clean_key,
+        resolved_ak_id,
+        resolved_ak_secret,
+        body_path=file_path,
+        content_type=content_type,
     )
     if status not in (200, 201):
         raise OpsError(f"OSS PUT failed HTTP {status}: {body.decode('utf-8', errors='replace')}")
-    print(
-        json.dumps(
-            {
-                "uploaded": True,
-                "url": f"https://{args.bucket}.{args.endpoint}/{object_key}",
-                "objectKey": object_key,
-                "sizeBytes": size,
-                "sha256": sha256,
-                "etag": headers.get("etag", "").strip('"'),
-            },
-            indent=2,
-        )
+    return {
+        "uploaded": True,
+        "url": f"https://{bucket}.{endpoint}/{clean_key}",
+        "objectKey": clean_key,
+        "sizeBytes": size,
+        "sha256": sha256,
+        "etag": headers.get("etag", "").strip('"'),
+    }
+
+
+def watch_device_job(
+    base_url: str,
+    token: str | None,
+    device_id: str,
+    job_id: str,
+    poll_interval_s: float = 3.0,
+    timeout_s: float = 300.0,
+) -> dict[str, Any]:
+    dev = urllib.parse.quote(validate_device_id(device_id))
+    jid = urllib.parse.quote(job_id)
+    deadline = time.monotonic() + max(1.0, timeout_s)
+    last_sig: tuple[Any, ...] | None = None
+    while True:
+        _, job = api_call(base_url, "GET", f"/v1/devices/{dev}/firmware/jobs/{jid}", token)
+        phase = str(job.get("phase", ""))
+        downloaded = job.get("bytesDownloaded", 0)
+        message = job.get("message")
+        sig = (phase, downloaded, message)
+        if sig != last_sig:
+            extra = f" bytes={downloaded}" if downloaded else ""
+            if message:
+                extra += f" msg={message}"
+            print(f"[ota-watch] device={device_id} job={job_id} phase={phase}{extra}", file=sys.stderr)
+            last_sig = sig
+        if phase in TERMINAL_JOB_PHASES:
+            return job
+        if time.monotonic() >= deadline:
+            raise OpsError(f"timed out waiting for job {job_id} (last phase={phase})")
+        time.sleep(max(0.05, poll_interval_s))
+
+
+def cmd_oss_upload(args: argparse.Namespace) -> int:
+    result = upload_to_oss(
+        file_path=args.file,
+        object_key=args.object_key,
+        bucket=args.bucket,
+        endpoint=args.endpoint,
+        content_type=args.content_type,
+        overwrite=args.overwrite,
+        dry_run=args.dry_run,
     )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -924,9 +1000,291 @@ def cmd_job(args: argparse.Namespace) -> int:
 
 def cmd_releases(args: argparse.Namespace) -> int:
     token = resolve_token(args)
-    dev = urllib.parse.quote(validate_device_id(args.device_id))
-    _, data = api_call(args.base_url, "GET", f"/v1/devices/{dev}/firmware/releases", token)
+    if args.device_id:
+        dev = urllib.parse.quote(validate_device_id(args.device_id))
+        _, data = api_call(args.base_url, "GET", f"/v1/devices/{dev}/firmware/releases", token)
+    else:
+        _, data = api_call(args.base_url, "GET", "/v1/releases", token)
     print(json.dumps(data, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_register_release(args: argparse.Namespace) -> int:
+    token = resolve_token(args)
+    if not args.template.is_file():
+        raise OpsError(f"template file not found: {args.template}")
+    payload = json.loads(args.template.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise OpsError("template JSON must be an object")
+    status, data = api_call(args.base_url, "POST", "/v1/releases", token, body=payload)
+    print(json.dumps({"httpStatus": status, "release": data}, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_publish(args: argparse.Namespace) -> int:
+    if bool(args.source_dir) == bool(args.artifact):
+        raise OpsError("provide exactly one of --source-dir or --artifact")
+    if args.device_id and args.rollout_id:
+        raise OpsError("provide at most one of --device-id or --rollout-id")
+    if args.watch and not args.device_id:
+        raise OpsError("--watch requires --device-id")
+
+    release_id = validate_release_id(args.release_id)
+    object_key = (
+        args.object_key.lstrip("/")
+        if args.object_key
+        else default_robot_object_key(
+            args.artifact_type,
+            args.channel,
+            release_id,
+            policy_slot=args.policy_slot,
+            component=args.component,
+        )
+    )
+
+    tmp_ctx = tempfile.TemporaryDirectory() if (args.source_dir and not args.output) else None
+    try:
+        package_meta: dict[str, Any] | None = None
+        if args.source_dir:
+            tar_path = args.output if args.output else Path(tmp_ctx.name) / f"{release_id}.tar.gz"  # type: ignore[union-attr]
+            package_meta = build_package(args.source_dir, tar_path, args.artifact_type, args.component)
+            artifact_path = tar_path
+        else:
+            artifact_path = args.artifact
+            if not artifact_path.is_file():
+                raise OpsError(f"artifact file not found: {artifact_path}")
+
+        tpl_args = argparse.Namespace(
+            release_id=release_id,
+            version=args.version,
+            sequence=args.sequence,
+            channel=args.channel,
+            artifact_type=args.artifact_type,
+            object_key=object_key,
+            bundle_spec=None,
+            delta_object_key=args.delta_object_key,
+            artifact=artifact_path,
+            size_bytes=None,
+            sha256=None,
+            model=args.model,
+            hardware_revision=args.hardware_revision,
+            min_bootloader=args.min_bootloader,
+            min_brainstem=args.min_brainstem,
+            min_battery=args.min_battery,
+            health_timeout_ms=args.health_timeout_ms,
+            manifest_ttl_seconds=args.manifest_ttl_seconds,
+            key_id=args.key_id,
+            policy_slot=args.policy_slot,
+            shadow_frames=args.shadow_frames,
+            no_activate=args.no_activate,
+            component=args.component,
+            systemd_unit=args.systemd_unit,
+            health_url=args.health_url,
+            requires=args.requires,
+        )
+        template = render_template(tpl_args)
+        if args.save_template:
+            atomic_write_bytes(
+                args.save_template,
+                (json.dumps(template, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+            )
+
+        upload_result: dict[str, Any] | None = None
+        if not args.skip_upload:
+            upload_result = upload_to_oss(
+                file_path=artifact_path,
+                object_key=object_key,
+                bucket=args.bucket,
+                endpoint=args.endpoint,
+                content_type="application/gzip",
+                overwrite=args.overwrite,
+                dry_run=args.dry_run,
+            )
+
+        if args.dry_run:
+            summary: dict[str, Any] = {
+                "dryRun": True,
+                "releaseId": release_id,
+                "objectKey": object_key,
+                "package": package_meta,
+                "upload": upload_result,
+                "template": template,
+            }
+            if args.device_id:
+                summary["plannedJob"] = {
+                    "deviceId": validate_device_id(args.device_id),
+                    "releaseId": release_id,
+                    "idempotencyKey": args.idempotency_key or f"pub-{release_id}-{args.device_id}",
+                    "watch": bool(args.watch),
+                }
+            if args.rollout_id:
+                summary["plannedRollout"] = {
+                    "rolloutId": args.rollout_id,
+                    "releaseId": release_id,
+                }
+            print(json.dumps(summary, indent=2, ensure_ascii=False))
+            return 0
+
+        token = resolve_token(args)
+        reg_status, registered = api_call(args.base_url, "POST", "/v1/releases", token, body=template)
+
+        result: dict[str, Any] = {
+            "releaseId": release_id,
+            "objectKey": object_key,
+            "package": package_meta,
+            "upload": upload_result,
+            "registerStatus": reg_status,
+            "release": registered,
+        }
+
+        if args.device_id:
+            dev = urllib.parse.quote(validate_device_id(args.device_id))
+            idem = args.idempotency_key or f"pub-{release_id}-{args.device_id}"
+            _, job = api_call(
+                args.base_url,
+                "POST",
+                f"/v1/devices/{dev}/firmware/jobs",
+                token,
+                body={"releaseId": release_id, "idempotencyKey": idem},
+            )
+            result["job"] = job
+            if args.watch:
+                final_job = watch_device_job(
+                    args.base_url,
+                    token,
+                    args.device_id,
+                    str(job["jobId"]),
+                    poll_interval_s=args.poll_interval,
+                    timeout_s=args.watch_timeout,
+                )
+                result["job"] = final_job
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+                return 0 if final_job.get("phase") == "succeeded" else 1
+        elif args.rollout_id:
+            rollout_payload: dict[str, Any] = {
+                "rolloutId": args.rollout_id,
+                "releaseId": release_id,
+                "targetModel": args.model,
+                "targetHardwareRevision": args.hardware_revision,
+                "stages": [
+                    {
+                        "name": "canary",
+                        "ring": "canary",
+                        "percent": 100,
+                        "maxDevices": args.canary_max_devices,
+                        "bakeSeconds": args.canary_bake_seconds,
+                        "autoPromote": False,
+                    },
+                    {
+                        "name": "prod-10",
+                        "ring": "prod",
+                        "percent": 10,
+                        "bakeSeconds": args.prod_bake_seconds,
+                        "autoPromote": False,
+                    },
+                    {
+                        "name": "prod-100",
+                        "ring": "prod",
+                        "percent": 100,
+                        "bakeSeconds": 0,
+                        "autoPromote": False,
+                    },
+                ],
+                "circuitBreaker": {
+                    "maxFailureCount": args.max_failure_count,
+                    "maxFailureRate": args.max_failure_rate,
+                },
+            }
+            if args.tag:
+                rollout_payload["targetTags"] = args.tag
+            _, rollout = api_call(args.base_url, "POST", "/v1/rollouts", token, body=rollout_payload)
+            result["rollout"] = rollout
+
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+    finally:
+        if tmp_ctx is not None:
+            tmp_ctx.cleanup()
+
+
+def cmd_publish_android(args: argparse.Namespace) -> int:
+    if not args.apk.is_file():
+        raise OpsError(f"APK file not found: {args.apk}")
+    if args.version_code <= 0:
+        raise OpsError("--version-code must be positive")
+    apk_sha, apk_size = sha256_file(args.apk)
+    object_key = (
+        args.object_key.lstrip("/")
+        if args.object_key
+        else default_android_object_key(args.channel, args.version_name, args.version_code)
+    )
+
+    upload_result: dict[str, Any] | None = None
+    if not args.skip_upload:
+        upload_result = upload_to_oss(
+            file_path=args.apk,
+            object_key=object_key,
+            bucket=args.bucket,
+            endpoint=args.endpoint,
+            content_type="application/vnd.android.package-archive",
+            overwrite=args.overwrite,
+            dry_run=args.dry_run,
+        )
+
+    payload = {
+        "channel": args.channel,
+        "versionName": args.version_name.strip(),
+        "versionCode": args.version_code,
+        "minSupportedCode": args.min_supported_code,
+        "mandatory": args.mandatory,
+        "changelog": args.changelog,
+        "apkSha256": apk_sha,
+        "apkSizeBytes": apk_size,
+        "objectKey": object_key,
+    }
+    if args.dry_run:
+        print(
+            json.dumps(
+                {"dryRun": True, "upload": upload_result, "publishPayload": payload},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    token = resolve_token(args)
+    _, published = api_call(args.base_url, "POST", "/v1/apps/android/releases", token, body=payload)
+
+    verified: dict[str, Any] | None = None
+    if not args.skip_verify:
+        probe_code = max(0, args.version_code - 1)
+        ch = urllib.parse.quote(args.channel)
+        _, latest = api_call(
+            args.base_url,
+            "GET",
+            f"/v1/apps/android/latest?channel={ch}&version_code={probe_code}",
+            token=None,
+        )
+        if (
+            not isinstance(latest, dict)
+            or latest.get("versionCode") != args.version_code
+            or str(latest.get("apkSha256", "")).lower() != apk_sha.lower()
+            or not latest.get("updateAvailable")
+        ):
+            raise OpsError(f"public /v1/apps/android/latest verification mismatch: {latest}")
+        verified = {
+            "updateAvailable": latest.get("updateAvailable"),
+            "versionCode": latest.get("versionCode"),
+            "apkSha256": latest.get("apkSha256"),
+        }
+
+    print(
+        json.dumps(
+            {"upload": upload_result, "release": published, "verifiedLatest": verified},
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
@@ -1089,9 +1447,82 @@ def build_parser() -> argparse.ArgumentParser:
         jp.add_argument("--job-id", required=True)
     sp_job.set_defaults(func=cmd_job)
 
-    sp_rel = sub.add_parser("releases", help="List compatible releases for a device")
-    sp_rel.add_argument("--device-id", required=True)
+    sp_rel = sub.add_parser("releases", help="List cloud releases (all, or compatible for one device)")
+    sp_rel.add_argument("--device-id", help="Optional device ID to filter compatible releases")
     sp_rel.set_defaults(func=cmd_releases)
+
+    sp_reg = sub.add_parser("register-release", help="Register a manifest.template.json via POST /v1/releases")
+    sp_reg.add_argument("--template", required=True, type=Path)
+    sp_reg.set_defaults(func=cmd_register_release)
+
+    sp_pub = sub.add_parser(
+        "publish",
+        help="One-click robot OTA: package -> OSS upload -> HTTPS register -> optional device job / rollout",
+    )
+    sp_pub.add_argument("--type", dest="artifact_type", required=True, choices=ALLOWED_PACKAGE_TYPES)
+    sp_pub.add_argument("--source-dir", type=Path, help="Source directory to package into .tar.gz")
+    sp_pub.add_argument("--artifact", type=Path, help="Pre-built .tar.gz artifact (mutually exclusive with --source-dir)")
+    sp_pub.add_argument("--output", type=Path, help="Optional local path to save the built .tar.gz")
+    sp_pub.add_argument("--save-template", type=Path, help="Optional local path to save generated manifest.template.json")
+    sp_pub.add_argument("--release-id", required=True)
+    sp_pub.add_argument("--version", required=True)
+    sp_pub.add_argument("--sequence", required=True, type=int)
+    sp_pub.add_argument("--channel", default="qa", choices=ALLOWED_CHANNELS)
+    sp_pub.add_argument("--object-key", default="", help="Optional OSS object key (auto-derived if omitted)")
+    sp_pub.add_argument("--delta-object-key")
+    sp_pub.add_argument("--bucket", default=os.environ.get("DOSO_OSS_BUCKET", "doso-ota-prod-shanghai"))
+    sp_pub.add_argument("--endpoint", default=os.environ.get("DOSO_OSS_ENDPOINT", "oss-cn-shanghai.aliyuncs.com"))
+    sp_pub.add_argument("--overwrite", action="store_true")
+    sp_pub.add_argument("--skip-upload", action="store_true")
+    sp_pub.add_argument("--dry-run", action="store_true")
+    sp_pub.add_argument("--model", default="THUNDER 01")
+    sp_pub.add_argument("--hardware-revision", default="rdk-s100p")
+    sp_pub.add_argument("--min-bootloader", default="1.0.0")
+    sp_pub.add_argument("--min-brainstem", default="0.0.1")
+    sp_pub.add_argument("--min-battery", type=int, default=20)
+    sp_pub.add_argument("--health-timeout-ms", type=int, default=30000)
+    sp_pub.add_argument("--manifest-ttl-seconds", type=int, default=1800)
+    sp_pub.add_argument("--key-id", default="release-key-2026-01")
+    sp_pub.add_argument("--policy-slot")
+    sp_pub.add_argument("--shadow-frames", type=int, default=50)
+    sp_pub.add_argument("--no-activate", action="store_true")
+    sp_pub.add_argument("--component")
+    sp_pub.add_argument("--systemd-unit")
+    sp_pub.add_argument("--health-url")
+    sp_pub.add_argument("--requires", action="append")
+    sp_pub.add_argument("--device-id", help="Immediately dispatch a single-device OTA job after registration")
+    sp_pub.add_argument("--idempotency-key", help="Optional idempotency key for --device-id job")
+    sp_pub.add_argument("--watch", action="store_true", help="Poll job status until terminal phase (requires --device-id)")
+    sp_pub.add_argument("--poll-interval", type=float, default=3.0)
+    sp_pub.add_argument("--watch-timeout", type=float, default=300.0)
+    sp_pub.add_argument("--rollout-id", help="Immediately create a canary->prod rollout after registration")
+    sp_pub.add_argument("--tag", action="append")
+    sp_pub.add_argument("--canary-max-devices", type=int, default=1)
+    sp_pub.add_argument("--canary-bake-seconds", type=int, default=1800)
+    sp_pub.add_argument("--prod-bake-seconds", type=int, default=3600)
+    sp_pub.add_argument("--max-failure-count", type=int, default=1)
+    sp_pub.add_argument("--max-failure-rate", type=float, default=0.05)
+    sp_pub.set_defaults(func=cmd_publish)
+
+    sp_pub_apk = sub.add_parser(
+        "publish-android",
+        help="One-click Android App OTA: OSS upload APK -> publish metadata -> verify public /latest",
+    )
+    sp_pub_apk.add_argument("--apk", required=True, type=Path)
+    sp_pub_apk.add_argument("--channel", default="prod")
+    sp_pub_apk.add_argument("--version-name", required=True)
+    sp_pub_apk.add_argument("--version-code", required=True, type=int)
+    sp_pub_apk.add_argument("--min-supported-code", type=int, default=0)
+    sp_pub_apk.add_argument("--mandatory", action="store_true")
+    sp_pub_apk.add_argument("--changelog", default="")
+    sp_pub_apk.add_argument("--object-key", default="", help="Optional OSS object key (auto-derived if omitted)")
+    sp_pub_apk.add_argument("--bucket", default=os.environ.get("DOSO_OSS_BUCKET", "doso-ota-prod-shanghai"))
+    sp_pub_apk.add_argument("--endpoint", default=os.environ.get("DOSO_OSS_ENDPOINT", "oss-cn-shanghai.aliyuncs.com"))
+    sp_pub_apk.add_argument("--overwrite", action="store_true")
+    sp_pub_apk.add_argument("--skip-upload", action="store_true")
+    sp_pub_apk.add_argument("--skip-verify", action="store_true")
+    sp_pub_apk.add_argument("--dry-run", action="store_true")
+    sp_pub_apk.set_defaults(func=cmd_publish_android)
 
     sp_st = sub.add_parser("fleet-status", help="Read reported device inventory & RT metrics")
     sp_st.add_argument("--device-id")

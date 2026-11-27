@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DOSO OTA 管理台</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">D</div>
+        <div class="brand-text">
+          <div class="brand-name">DOSO</div>
+          <div class="brand-sub">OTA 管理台</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-view="devices" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>
+          <span>设备车队</span>
+          <span class="nav-count" id="nav-count-devices">0</span>
+        </button>
+
+        <button class="nav-item" data-view="releases" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
+          <span>机器狗版本</span>
+          <span class="nav-count" id="nav-count-releases">0</span>
+        </button>
+
+        <button class="nav-item" data-view="rollouts" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+          <span>灰度发布</span>
+          <span class="nav-count" id="nav-count-rollouts">0</span>
+        </button>
+
+        <button class="nav-item" data-view="android" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+          <span>App 更新</span>
+        </button>
+
+        <div class="nav-divider"></div>
+
+        <button class="nav-item" data-view="settings" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          <span>云端配置</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button class="conn-pill" id="conn-pill" type="button" title="查看云端配置">
+          <span class="dot dot-neutral" id="conn-dot"></span>
+          <span id="conn-label">检测中</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-btn mobile-menu-btn" id="mobile-menu-btn" type="button" aria-label="展开导航">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+          </button>
+          <h1 class="page-title" id="page-title">设备车队</h1>
+        </div>
+        <div class="topbar-right">
+          <button class="btn btn-ghost" id="btn-refresh" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+            <span>刷新</span>
+          </button>
+          <button class="btn btn-primary" id="btn-primary-cta" type="button">发布固件</button>
+        </div>
+      </header>
+
+      <div class="banner hidden" id="config-banner">
+        <span id="config-banner-text">云端凭证未配置</span>
+        <button class="btn btn-sm btn-primary" id="btn-goto-settings" type="button">前往配置</button>
+      </div>
+
+      <main class="content">
+        <!-- View 1: Devices & Active Jobs -->
+        <section class="view active" id="view-devices">
+          <div class="metrics">
+            <div class="metric">
+              <div class="metric-label">设备总数</div>
+              <div class="metric-value" id="stat-devices">0</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">云端版本</div>
+              <div class="metric-value" id="stat-releases">0</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">进行中灰度</div>
+              <div class="metric-value" id="stat-rollouts">0</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">App 正式版</div>
+              <div class="metric-value metric-value-sm" id="stat-android">—</div>
+            </div>
+          </div>
+
+          <div class="section-block hidden" id="active-jobs-block">
+            <div class="section-head">
+              <h2>近期推送任务</h2>
+            </div>
+            <div class="job-list" id="job-list"></div>
+          </div>
+
+          <div class="section-block">
+            <div class="section-head">
+              <h2>已上报设备</h2>
+              <div class="section-actions">
+                <input class="search-input" id="device-search" type="search" placeholder="搜索设备编号或版本" />
+                <button class="btn btn-ghost btn-sm" id="btn-manual-push" type="button">按编号推送</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>设备编号</th>
+                    <th>状态</th>
+                    <th>固件版本</th>
+                    <th>策略配置</th>
+                    <th>最近心跳</th>
+                    <th class="col-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="devices-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- View 2: Robot Releases -->
+        <section class="view" id="view-releases">
+          <div class="section-block">
+            <div class="section-head">
+              <h2>云端版本库</h2>
+              <div class="section-actions">
+                <input class="search-input" id="release-search" type="search" placeholder="搜索版本编号或类型" />
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>版本编号</th>
+                    <th>类型</th>
+                    <th>渠道</th>
+                    <th>版本号</th>
+                    <th>序号</th>
+                    <th>包大小</th>
+                    <th class="col-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="releases-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- View 3: Rollouts -->
+        <section class="view" id="view-rollouts">
+          <div class="section-block">
+            <div class="section-head">
+              <h2>灰度计划</h2>
+            </div>
+            <div class="rollout-list" id="rollout-list"></div>
+          </div>
+        </section>
+
+        <!-- View 4: Android App OTA -->
+        <section class="view" id="view-android">
+          <div class="section-block">
+            <div class="section-head">
+              <h2>当前线上版本</h2>
+            </div>
+            <div class="channel-grid" id="android-channels"></div>
+          </div>
+
+          <div class="section-block">
+            <div class="section-head">
+              <h2>发布新版 APK</h2>
+            </div>
+            <form class="form-panel" id="android-publish-form">
+              <div class="form-row">
+                <div class="field field-full">
+                  <label>安装包</label>
+                  <div class="dropzone" id="apk-dropzone">
+                    <input type="file" id="apk-file-input" accept=".apk" hidden />
+                    <div class="dropzone-main">
+                      <span id="apk-file-label">拖拽 APK 到此处，或点击选择</span>
+                      <div class="dropzone-btns">
+                        <button class="btn btn-sm btn-ghost" id="btn-apk-upload" type="button">选择文件</button>
+                        <button class="btn btn-sm btn-ghost" id="btn-apk-pick" type="button">本机浏览</button>
+                      </div>
+                    </div>
+                    <div class="dropzone-meta" id="apk-file-meta"></div>
+                  </div>
+                  <div class="quick-chips" id="local-apk-chips"></div>
+                </div>
+              </div>
+
+              <div class="form-grid-3">
+                <div class="field">
+                  <label for="apk-channel">渠道</label>
+                  <select id="apk-channel">
+                    <option value="prod">prod</option>
+                    <option value="qa">qa</option>
+                    <option value="beta">beta</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="apk-version-name">版本号</label>
+                  <input id="apk-version-name" type="text" placeholder="0.2.0" required />
+                </div>
+                <div class="field">
+                  <label for="apk-version-code">版本码</label>
+                  <input id="apk-version-code" type="number" min="1" placeholder="57" required />
+                </div>
+              </div>
+
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="apk-min-code">最低兼容版本码</label>
+                  <input id="apk-min-code" type="number" min="0" value="0" />
+                </div>
+                <div class="field field-checkbox">
+                  <label class="checkbox-label">
+                    <input id="apk-mandatory" type="checkbox" />
+                    <span>强制更新</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="apk-changelog">更新说明</label>
+                <textarea id="apk-changelog" rows="3" placeholder="修复卡顿并优化遥控响应"></textarea>
+              </div>
+
+              <details class="advanced">
+                <summary>高级选项</summary>
+                <div class="form-grid-2">
+                  <div class="field">
+                    <label for="apk-object-key">自定义存储路径</label>
+                    <input id="apk-object-key" type="text" placeholder="留空自动生成" />
+                  </div>
+                  <div class="field field-checkbox">
+                    <label class="checkbox-label">
+                      <input id="apk-overwrite" type="checkbox" />
+                      <span>覆盖同名文件</span>
+                    </label>
+                  </div>
+                </div>
+              </details>
+
+              <div class="form-actions">
+                <button class="btn btn-ghost" id="btn-apk-dryrun" type="button">仅预检</button>
+                <button class="btn btn-primary" id="btn-apk-submit" type="submit">立即发布</button>
+              </div>
+              <div class="step-result hidden" id="apk-publish-result"></div>
+            </form>
+          </div>
+        </section>
+
+        <!-- View 5: Settings -->
+        <section class="view" id="view-settings">
+          <div class="section-block">
+            <div class="section-head">
+              <h2>云端连接</h2>
+              <button class="btn btn-ghost btn-sm" id="btn-test-conn" type="button">测试连接</button>
+            </div>
+            <form class="form-panel" id="settings-form">
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="cfg-cloud-url">服务地址</label>
+                  <input id="cfg-cloud-url" type="url" placeholder="https://api.dosorobotics.com/ota" required />
+                </div>
+                <div class="field">
+                  <label for="cfg-api-token">发布令牌 <span class="field-status" id="cfg-token-status"></span></label>
+                  <input id="cfg-api-token" type="password" autocomplete="off" placeholder="留空保持当前配置" />
+                </div>
+              </div>
+
+              <div class="section-subhead">对象存储</div>
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="cfg-oss-bucket">存储桶</label>
+                  <input id="cfg-oss-bucket" type="text" placeholder="doso-ota-prod-shanghai" />
+                </div>
+                <div class="field">
+                  <label for="cfg-oss-endpoint">节点域名</label>
+                  <input id="cfg-oss-endpoint" type="text" placeholder="oss-cn-shanghai.aliyuncs.com" />
+                </div>
+              </div>
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="cfg-oss-ak-id">AccessKey ID <span class="field-status" id="cfg-akid-status"></span></label>
+                  <input id="cfg-oss-ak-id" type="password" autocomplete="off" placeholder="留空保持当前配置" />
+                </div>
+                <div class="field">
+                  <label for="cfg-oss-ak-secret">AccessKey Secret <span class="field-status" id="cfg-aksec-status"></span></label>
+                  <input id="cfg-oss-ak-secret" type="password" autocomplete="off" placeholder="留空保持当前配置" />
+                </div>
+              </div>
+
+              <div class="section-subhead">默认机型</div>
+              <div class="form-grid-3">
+                <div class="field">
+                  <label for="cfg-model">型号</label>
+                  <input id="cfg-model" type="text" placeholder="THUNDER 01" />
+                </div>
+                <div class="field">
+                  <label for="cfg-hw">硬件版本</label>
+                  <input id="cfg-hw" type="text" placeholder="rdk-s100p" />
+                </div>
+                <div class="field">
+                  <label for="cfg-key-id">签名密钥 ID</label>
+                  <input id="cfg-key-id" type="text" placeholder="release-key-2026-01" />
+                </div>
+              </div>
+
+              <div class="form-actions">
+                <button class="btn btn-primary" type="submit">保存配置</button>
+              </div>
+              <div class="step-result hidden" id="conn-test-result"></div>
+            </form>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- Slide-over Drawer: Publish Robot Release -->
+  <div class="drawer-backdrop hidden" id="drawer-publish">
+    <div class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-publish-title">
+      <div class="drawer-head">
+        <h2 id="drawer-publish-title">发布机器狗版本</h2>
+        <button class="icon-btn" data-close-drawer="drawer-publish" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form class="drawer-body" id="robot-publish-form">
+        <div class="form-grid-2">
+          <div class="field">
+            <label for="pub-type">版本类型</label>
+            <select id="pub-type">
+              <option value="brainstem_release">核心固件</option>
+              <option value="policy_package">运动策略</option>
+              <option value="component_release">独立组件</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="pub-channel">发布渠道</label>
+            <select id="pub-channel">
+              <option value="qa">qa</option>
+              <option value="stable">stable</option>
+              <option value="dev">dev</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field hidden" id="pub-policy-slot-wrap">
+          <label for="pub-policy-slot">策略槽位</label>
+          <input id="pub-policy-slot" type="text" placeholder="locomotion" />
+        </div>
+        <div class="field hidden" id="pub-component-wrap">
+          <label for="pub-component">组件名称</label>
+          <input id="pub-component" type="text" placeholder="perception" />
+        </div>
+
+        <div class="field">
+          <label>构建产物</label>
+          <div class="segmented" id="pub-source-tabs">
+            <button type="button" class="seg-btn active" data-source="local_dir">本地目录打包</button>
+            <button type="button" class="seg-btn" data-source="upload">上传压缩包</button>
+            <button type="button" class="seg-btn" data-source="local_file">本地文件</button>
+          </div>
+
+          <div class="source-pane" id="pane-local-dir">
+            <div class="input-with-btn">
+              <input id="pub-dir-path" type="text" placeholder="选择包含固件或策略的目录" />
+              <button class="btn btn-ghost btn-sm" id="btn-pick-dir" type="button">浏览</button>
+            </div>
+            <div class="dropzone-meta" id="pub-dir-meta"></div>
+          </div>
+
+          <div class="source-pane hidden" id="pane-upload">
+            <div class="dropzone" id="robot-dropzone">
+              <input type="file" id="robot-file-input" hidden />
+              <div class="dropzone-main">
+                <span id="robot-file-label">拖拽压缩包或固件到此</span>
+                <button class="btn btn-sm btn-ghost" id="btn-robot-upload" type="button">选择文件</button>
+              </div>
+              <div class="dropzone-meta" id="robot-file-meta"></div>
+            </div>
+          </div>
+
+          <div class="source-pane hidden" id="pane-local-file">
+            <div class="input-with-btn">
+              <input id="pub-file-path" type="text" placeholder="选择 .tar.gz 或固件文件" />
+              <button class="btn btn-ghost btn-sm" id="btn-pick-file" type="button">浏览</button>
+            </div>
+            <div class="quick-chips" id="local-robot-chips"></div>
+            <div class="dropzone-meta" id="pub-file-meta"></div>
+          </div>
+        </div>
+
+        <div class="form-grid-2">
+          <div class="field">
+            <label for="pub-version">版本号</label>
+            <input id="pub-version" type="text" placeholder="0.2.0" required />
+          </div>
+          <div class="field">
+            <label for="pub-sequence">版本序号</label>
+            <input id="pub-sequence" type="number" min="1" required />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="pub-release-id">版本编号</label>
+          <input id="pub-release-id" type="text" required />
+        </div>
+
+        <div class="field">
+          <label for="pub-dispatch-mode">发布后动作</label>
+          <select id="pub-dispatch-mode">
+            <option value="none">仅上传并登记</option>
+            <option value="device">立即推送到指定设备</option>
+            <option value="rollout">创建灰度发布计划</option>
+          </select>
+        </div>
+
+        <div class="field hidden" id="pub-device-wrap">
+          <label for="pub-device-id">目标设备</label>
+          <input id="pub-device-id" type="text" list="known-devices-list" placeholder="输入或选择设备编号" />
+        </div>
+
+        <div class="field hidden" id="pub-rollout-wrap">
+          <label for="pub-rollout-id">灰度编号</label>
+          <input id="pub-rollout-id" type="text" placeholder="留空自动生成" />
+        </div>
+
+        <details class="advanced">
+          <summary>高级参数</summary>
+          <div class="form-grid-2">
+            <div class="field">
+              <label for="pub-model">适用型号</label>
+              <input id="pub-model" type="text" />
+            </div>
+            <div class="field">
+              <label for="pub-hw">硬件版本</label>
+              <input id="pub-hw" type="text" />
+            </div>
+            <div class="field">
+              <label for="pub-min-battery">最低电量 (%)</label>
+              <input id="pub-min-battery" type="number" min="0" max="100" value="20" />
+            </div>
+            <div class="field">
+              <label for="pub-object-key">自定义存储路径</label>
+              <input id="pub-object-key" type="text" placeholder="留空自动生成" />
+            </div>
+          </div>
+          <label class="checkbox-label">
+            <input id="pub-overwrite" type="checkbox" />
+            <span>覆盖同名存储对象</span>
+          </label>
+        </details>
+
+        <div class="step-result hidden" id="robot-publish-result"></div>
+
+        <div class="drawer-foot">
+          <button class="btn btn-ghost" id="btn-pub-dryrun" type="button">仅预检</button>
+          <button class="btn btn-primary" id="btn-pub-submit" type="submit">立即发布</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Slide-over Drawer: Push to Device -->
+  <div class="drawer-backdrop hidden" id="drawer-push">
+    <div class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-push-title">
+      <div class="drawer-head">
+        <h2 id="drawer-push-title">推送更新到设备</h2>
+        <button class="icon-btn" data-close-drawer="drawer-push" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form class="drawer-body" id="push-job-form">
+        <div class="field">
+          <label for="push-device-id">设备编号</label>
+          <input id="push-device-id" type="text" list="known-devices-list" required placeholder="例如 dog-01" />
+        </div>
+        <div class="field">
+          <label for="push-release-id">目标版本</label>
+          <select id="push-release-id" required></select>
+        </div>
+        <div class="drawer-foot">
+          <button class="btn btn-ghost" data-close-drawer="drawer-push" type="button">取消</button>
+          <button class="btn btn-primary" type="submit">立即推送</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Slide-over Drawer: Create Rollout -->
+  <div class="drawer-backdrop hidden" id="drawer-rollout">
+    <div class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-rollout-title">
+      <div class="drawer-head">
+        <h2 id="drawer-rollout-title">新建灰度发布</h2>
+        <button class="icon-btn" data-close-drawer="drawer-rollout" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form class="drawer-body" id="create-rollout-form">
+        <div class="field">
+          <label for="ro-release-id">发布版本</label>
+          <select id="ro-release-id" required></select>
+        </div>
+        <div class="field">
+          <label for="ro-id">灰度编号</label>
+          <input id="ro-id" type="text" placeholder="留空自动生成" />
+        </div>
+        <div class="field">
+          <label for="ro-preset">分批节奏</label>
+          <select id="ro-preset">
+            <option value="standard">三段式：金丝雀 → 10% → 全量</option>
+            <option value="fast">两段式：金丝雀 → 全量</option>
+          </select>
+        </div>
+        <div class="form-grid-2">
+          <div class="field">
+            <label for="ro-canary-max">金丝雀台数</label>
+            <input id="ro-canary-max" type="number" min="1" value="1" />
+          </div>
+          <div class="field">
+            <label for="ro-max-fail">熔断失败数</label>
+            <input id="ro-max-fail" type="number" min="1" value="1" />
+          </div>
+        </div>
+        <div class="drawer-foot">
+          <button class="btn btn-ghost" data-close-drawer="drawer-rollout" type="button">取消</button>
+          <button class="btn btn-primary" type="submit">创建灰度</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <datalist id="known-devices-list"></datalist>
+  <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
