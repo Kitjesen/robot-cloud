@@ -123,6 +123,9 @@ def start_mock_cloud(state: MockCloudState) -> tuple[ThreadingHTTPServer, str]:
             if path == "/v1/rollouts":
                 self._send(200, list(state.rollouts.values()))
                 return
+            if path == "/v1/jobs":
+                self._send(200, list(state.jobs.values()))
+                return
             if path.startswith("/v1/devices/") and path.endswith("/firmware/releases"):
                 self._send(200, list(state.releases.values()))
                 return
@@ -286,6 +289,7 @@ def start_mock_cloud(state: MockCloudState) -> tuple[ThreadingHTTPServer, str]:
 class OtaConsoleTests(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["DOSO_OTA_CONSOLE_QUIET"] = "1"
+        os.environ["DOSO_OTA_CONSOLE_DISABLE_SWAS"] = "1"
         self.tmp = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp.name)
         self.cfg_path = self.tmp_path / "console.env"
@@ -675,6 +679,106 @@ class OtaConsoleTests(unittest.TestCase):
             )
             self.assertEqual(st_p, 200)
             self.assertEqual(probed["suggestedNumber"], 4)
+
+    def test_unified_fleet_anomalies_and_batch_ops(self) -> None:
+        self._configure_console()
+
+        # Verify anomaly diagnosis covers motor fault, failed OTA, unregistered OTA, and healthy dogs
+        unified = console.fleet_ops.build_unified_fleet(
+            registered_devices=[
+                {
+                    "deviceId": "13131313-1313-4131-8131-131313131313",
+                    "model": "THUNDER 01",
+                    "hardwareRevision": "rdk-s100p",
+                    "enabled": True,
+                    "ring": "canary",
+                    "tags": ["dog3"],
+                }
+            ],
+            ota_statuses=[
+                {
+                    "deviceId": "13131313-1313-4131-8131-131313131313",
+                    "lastSeenAgeMs": 5000,
+                    "firmwareVersion": "0.0.4",
+                    "brainstemReady": True,
+                    "strategyReady": True,
+                    "canReadOnly": False,
+                }
+            ],
+            jobs=[
+                {
+                    "jobId": "j1",
+                    "deviceId": "13131313-1313-4131-8131-131313131313",
+                    "releaseId": "rel-1",
+                    "phase": "failed",
+                    "message": "checksum_mismatch",
+                    "updatedAtMs": 1000,
+                }
+            ],
+            releases=[],
+            swas_snapshot={
+                "available": True,
+                "tunnelPorts": [22003],
+                "inventory": [
+                    {
+                        "deviceId": "13131313-1313-4131-8131-131313131313",
+                        "serialNumber": "THUNDER-DEV-003",
+                        "displayName": "THUNDER 研发机 003",
+                        "modelCode": "THUNDER 01",
+                        "isSimulated": False,
+                        "ownerEmail": "995632531@qq.com",
+                        "remoteState": {
+                            "enabled": True,
+                            "gatewayReachable": True,
+                            "latest": {
+                                "report": {
+                                    "status": {
+                                        "control": {"criticalMotorFault": False, "motorOutputEnabled": False}
+                                    }
+                                }
+                            },
+                        },
+                    },
+                    {
+                        "deviceId": "d82a831a-2e86-4b46-975b-3d42473583b7",
+                        "serialNumber": "THUNDER-DEV-001",
+                        "displayName": "THUNDER 研发机 001",
+                        "modelCode": "THUNDER 01",
+                        "isSimulated": False,
+                        "ownerEmail": "995632531@qq.com",
+                        "remoteState": {"enabled": True, "gatewayReachable": False},
+                    },
+                ],
+            },
+        )
+        self.assertEqual(unified["summary"]["totalReal"], 2)
+        self.assertEqual(unified["summary"]["anomalyCount"], 2)
+        dog3 = next(d for d in unified["fleet"] if d["serialNumber"] == "THUNDER-DEV-003")
+        self.assertEqual(dog3["tunnelPort"], 22003)
+        self.assertEqual(dog3["healthLevel"], "critical")
+        self.assertTrue(any(a["code"] == "ota_failed" for a in dog3["anomalies"]))
+        dog1 = next(d for d in unified["fleet"] if d["serialNumber"] == "THUNDER-DEV-001")
+        self.assertTrue(any(a["code"] == "ota_unregistered" for a in dog1["anomalies"]))
+
+        # Batch ring update via API
+        st_br, br = self._req(
+            "POST",
+            "/api/fleet/batch-ring",
+            body={"deviceIds": ["dog-01"], "ring": "prod"},
+        )
+        self.assertEqual(st_br, 200)
+        self.assertTrue(br["results"][0]["ok"])
+        self.assertEqual(self.cloud_state.registered_devices["dog-01"]["ring"], "prod")
+
+        # Accounts RBAC route (mocked)
+        with mock.patch.object(
+            console.fleet_ops,
+            "list_accounts",
+            return_value={"accounts": [{"id": "u1", "email": "995632531@qq.com", "appRole": "admin"}], "primaryAdminEmail": "995632531@qq.com"},
+        ):
+            st_acc, acc = self._req("GET", "/api/accounts")
+            self.assertEqual(st_acc, 200)
+            self.assertEqual(acc["accounts"][0]["email"], "995632531@qq.com")
 
 
 if __name__ == "__main__":

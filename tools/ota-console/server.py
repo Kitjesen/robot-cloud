@@ -38,6 +38,7 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     OPS_SCRIPT_PATH = _BUNDLE_ROOT / "doso-ota-ops.py"
     ROBOT_OPS_PATH = _BUNDLE_ROOT / "robot_ops.py"
     PROVISION_OPS_PATH = _BUNDLE_ROOT / "provision_ops.py"
+    FLEET_OPS_PATH = _BUNDLE_ROOT / "fleet_ops.py"
 else:
     CONSOLE_DIR = Path(__file__).resolve().parent
     WEB_DIR = CONSOLE_DIR / "web"
@@ -45,6 +46,7 @@ else:
     OPS_SCRIPT_PATH = REPO_ROOT / "tools" / "deploy" / "doso-ota-ops.py"
     ROBOT_OPS_PATH = CONSOLE_DIR / "robot_ops.py"
     PROVISION_OPS_PATH = CONSOLE_DIR / "provision_ops.py"
+    FLEET_OPS_PATH = CONSOLE_DIR / "fleet_ops.py"
 
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
@@ -122,6 +124,7 @@ ops = load_module_from_path("doso_ota_ops", OPS_SCRIPT_PATH)
 robot_ops = load_module_from_path("doso_robot_ops", ROBOT_OPS_PATH)
 sys.modules["robot_ops"] = robot_ops
 provision_ops = load_module_from_path("doso_provision_ops", PROVISION_OPS_PATH)
+fleet_ops = load_module_from_path("doso_fleet_ops", FLEET_OPS_PATH)
 
 
 def default_config_path() -> Path:
@@ -675,10 +678,14 @@ class ConsoleContext:
             "releasesApiReady": False,
             "devices": [],
             "registeredDevices": [],
+            "fleet": [],
+            "fleetSummary": {},
+            "tunnelPorts": [],
             "releases": [],
             "rollouts": [],
             "android": {ch: None for ch in ANDROID_CHANNELS},
             "trackedJobs": [],
+            "jobs": [],
             "warnings": [],
         }
 
@@ -696,7 +703,8 @@ class ConsoleContext:
                 return None, None, str(exc)
 
         tracked_list = self.jobs.list_items()
-        with ThreadPoolExecutor(max_workers=9) as pool:
+        disable_swas = os.environ.get("DOSO_OTA_CONSOLE_DISABLE_SWAS", "").strip() == "1"
+        with ThreadPoolExecutor(max_workers=12) as pool:
             f_health = pool.submit(_safe_get, "/health", False, 8)
             f_android = {
                 ch: pool.submit(
@@ -711,6 +719,8 @@ class ConsoleContext:
             f_reg = pool.submit(_safe_get, "/v1/devices", True, 12) if token else None
             f_rel = pool.submit(_safe_get, "/v1/releases", True, 12) if token else None
             f_ro = pool.submit(_safe_get, "/v1/rollouts", True, 12) if token else None
+            f_jobs_all = pool.submit(_safe_get, "/v1/jobs?limit=200", True, 12) if token else None
+            f_swas = pool.submit(fleet_ops.fetch_swas_fleet_snapshot, cfg) if not disable_swas else None
             f_jobs = [
                 (
                     tracked,
@@ -729,6 +739,13 @@ class ConsoleContext:
             out["cloudReachable"] = st_h == 200
             if err_h:
                 out["warnings"].append(err_h)
+                swas_snap = f_swas.result() if f_swas is not None else None
+                unified = fleet_ops.build_unified_fleet(
+                    registered_devices=[], ota_statuses=[], jobs=[], releases=[], swas_snapshot=swas_snap
+                )
+                out["fleet"] = unified["fleet"]
+                out["fleetSummary"] = unified["summary"]
+                out["tunnelPorts"] = unified["tunnelPorts"]
                 return out
 
             for ch, fut in f_android.items():
@@ -736,6 +753,13 @@ class ConsoleContext:
                 out["android"][ch] = body_a if st_a == 200 else None
 
             if not token:
+                swas_snap = f_swas.result() if f_swas is not None else None
+                unified = fleet_ops.build_unified_fleet(
+                    registered_devices=[], ota_statuses=[], jobs=[], releases=[], swas_snapshot=swas_snap
+                )
+                out["fleet"] = unified["fleet"]
+                out["fleetSummary"] = unified["summary"]
+                out["tunnelPorts"] = unified["tunnelPorts"]
                 return out
 
             st_d, body_d, err_d = f_dev.result()  # type: ignore[union-attr]
@@ -779,6 +803,12 @@ class ConsoleContext:
             if st_ro == 200 and isinstance(body_ro, list):
                 out["rollouts"] = body_ro
 
+            cloud_jobs: list[dict[str, Any]] = []
+            if f_jobs_all is not None:
+                st_ja, body_ja, _ = f_jobs_all.result()
+                if st_ja == 200 and isinstance(body_ja, list):
+                    cloud_jobs = body_ja
+
             refreshed_jobs: list[dict[str, Any]] = []
             for tracked, fut in f_jobs:
                 st_j, body_j, _ = fut.result()
@@ -787,7 +817,38 @@ class ConsoleContext:
                     refreshed_jobs.append(body_j)
                 else:
                     refreshed_jobs.append(tracked)
-            out["trackedJobs"] = refreshed_jobs
+
+            # Merge persisted cloud jobs + session-tracked jobs by jobId
+            merged_jobs_map: dict[str, dict[str, Any]] = {}
+            for item in cloud_jobs:
+                jid = str(item.get("jobId") or "")
+                if jid:
+                    merged_jobs_map[jid] = item
+            for item in refreshed_jobs:
+                jid = str(item.get("jobId") or "")
+                if jid:
+                    merged_jobs_map[jid] = {**merged_jobs_map.get(jid, {}), **item}
+            merged_jobs = sorted(
+                merged_jobs_map.values(),
+                key=lambda x: max(int(x.get("updatedAtMs") or 0), int(x.get("createdAtMs") or 0)),
+                reverse=True,
+            )
+            out["jobs"] = merged_jobs
+            out["trackedJobs"] = [
+                j for j in merged_jobs if str(j.get("phase") or "") in fleet_ops.ACTIVE_JOB_PHASES
+            ][:20] or refreshed_jobs
+
+            swas_snap = f_swas.result() if f_swas is not None else None
+            unified = fleet_ops.build_unified_fleet(
+                registered_devices=out["registeredDevices"],
+                ota_statuses=out["devices"],
+                jobs=merged_jobs,
+                releases=out["releases"],
+                swas_snapshot=swas_snap,
+            )
+            out["fleet"] = unified["fleet"]
+            out["fleetSummary"] = unified["summary"]
+            out["tunnelPorts"] = unified["tunnelPorts"]
         return out
 
     def publish_robot_release(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1247,6 +1308,10 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     cfg = ctx.config_store.effective()
                     self._send_json(HTTPStatus.OK, robot_ops.discover_tunnels(cfg))
                     return
+                if path == "/api/accounts":
+                    cfg = ctx.config_store.effective()
+                    self._send_json(HTTPStatus.OK, fleet_ops.list_accounts(cfg))
+                    return
 
                 m_dev_rel = re.fullmatch(r"/api/devices/([^/]+)/releases", path)
                 if m_dev_rel:
@@ -1284,7 +1349,7 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     return
 
                 self._serve_static(path)
-            except (ops.OpsError, robot_ops.RobotOpsError, provision_ops.ProvisionError) as exc:
+            except (ops.OpsError, robot_ops.RobotOpsError, provision_ops.ProvisionError, fleet_ops.FleetOpsError) as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
@@ -1416,6 +1481,108 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/provision/finish-mqtt":
                     cfg = ctx.config_store.effective()
                     res = provision_ops.finish_mqtt_on_robot(cfg, body)
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/fleet/patrol":
+                    cfg = ctx.config_store.effective()
+                    ov = ctx.get_overview()
+                    res = fleet_ops.patrol_fleet(
+                        cfg,
+                        fleet_entries=ov.get("fleet") or [],
+                        port_credentials=body.get("portCredentials") or {},
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/fleet/batch-ring":
+                    cfg = ctx.config_store.effective()
+                    token = ctx._require_token(cfg)
+                    ring = str(body.get("ring") or "").strip()
+                    if ring not in ("dev", "canary", "prod"):
+                        raise fleet_ops.FleetOpsError("分环必须是 dev / canary / prod")
+                    dev_ids = [str(d).strip() for d in (body.get("deviceIds") or []) if str(d).strip()]
+                    if not dev_ids:
+                        raise fleet_ops.FleetOpsError("请至少选择 1 台机器狗")
+                    _, current_regs = ops.api_call(cfg["DOSO_OTA_CLOUD_URL"], "GET", "/v1/devices", token)
+                    reg_map = {str(r["deviceId"]): r for r in (current_regs or []) if isinstance(r, dict) and r.get("deviceId")}
+                    results = []
+                    for raw_id in dev_ids:
+                        did = ops.validate_device_id(raw_id)
+                        existing = reg_map.get(did) or {}
+                        payload_put = {
+                            "model": str(existing.get("model") or cfg["DOSO_DEFAULT_MODEL"]),
+                            "hardwareRevision": str(existing.get("hardwareRevision") or cfg["DOSO_DEFAULT_HW_REV"]),
+                            "enabled": existing.get("enabled", True) is not False,
+                            "ring": ring,
+                            "tags": list(existing.get("tags") or []),
+                        }
+                        try:
+                            _, saved = ops.api_call(
+                                cfg["DOSO_OTA_CLOUD_URL"],
+                                "PUT",
+                                f"/v1/devices/{urllib.parse.quote(did)}",
+                                token,
+                                body=payload_put,
+                            )
+                            results.append({"deviceId": did, "ok": True, "ring": saved.get("ring", ring)})
+                        except Exception as exc:
+                            results.append({"deviceId": did, "ok": False, "error": str(exc)})
+                    self._send_json(HTTPStatus.OK, {"ring": ring, "results": results})
+                    return
+
+                if path == "/api/fleet/batch-push":
+                    cfg = ctx.config_store.effective()
+                    token = ctx._require_token(cfg)
+                    release_id = ops.validate_release_id(str(body.get("releaseId") or ""))
+                    dev_ids = [str(d).strip() for d in (body.get("deviceIds") or []) if str(d).strip()]
+                    if not dev_ids:
+                        raise fleet_ops.FleetOpsError("请至少选择 1 台机器狗")
+                    ts_key = int(time.time())
+                    results = []
+                    for raw_id in dev_ids:
+                        did = ops.validate_device_id(raw_id)
+                        idem = f"batch-{release_id}-{did[:8]}-{ts_key}"
+                        try:
+                            _, job = ops.api_call(
+                                cfg["DOSO_OTA_CLOUD_URL"],
+                                "POST",
+                                f"/v1/devices/{urllib.parse.quote(did)}/firmware/jobs",
+                                token,
+                                body={"releaseId": release_id, "idempotencyKey": idem},
+                            )
+                            if isinstance(job, dict):
+                                ctx.jobs.record(job)
+                            results.append({"deviceId": did, "ok": True, "jobId": (job or {}).get("jobId")})
+                        except Exception as exc:
+                            results.append({"deviceId": did, "ok": False, "error": str(exc)})
+                    self._send_json(HTTPStatus.OK, {"releaseId": release_id, "results": results})
+                    return
+
+                if path == "/api/ops/error-logs":
+                    cfg = ctx.config_store.effective()
+                    res = fleet_ops.fetch_robot_error_logs(
+                        cfg,
+                        body.get("target") or {},
+                        int(body.get("hours") or 2),
+                        int(body.get("lines") or 80),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/accounts/role":
+                    cfg = ctx.config_store.effective()
+                    res = fleet_ops.update_account_role(
+                        cfg, str(body.get("userId") or ""), str(body.get("appRole") or "")
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/devices/owner":
+                    cfg = ctx.config_store.effective()
+                    res = fleet_ops.update_device_owner(
+                        cfg, str(body.get("deviceId") or ""), str(body.get("ownerEmail") or "")
+                    )
                     self._send_json(HTTPStatus.OK, res)
                     return
 
@@ -1602,7 +1769,7 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     return
 
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown_api"})
-            except (ops.OpsError, robot_ops.RobotOpsError, provision_ops.ProvisionError) as exc:
+            except (ops.OpsError, robot_ops.RobotOpsError, provision_ops.ProvisionError, fleet_ops.FleetOpsError) as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except ValueError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})

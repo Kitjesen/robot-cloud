@@ -20,8 +20,15 @@
       <nav class="nav">
         <button class="nav-item active" data-view="devices" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>
-          <span>设备车队</span>
+          <span>车队总览</span>
+          <span class="nav-alert hidden" id="nav-alert-devices">0</span>
           <span class="nav-count" id="nav-count-devices">0</span>
+        </button>
+
+        <button class="nav-item" data-view="jobs" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>升级任务</span>
+          <span class="nav-count" id="nav-count-jobs">0</span>
         </button>
 
         <button class="nav-item" data-view="releases" type="button">
@@ -46,6 +53,11 @@
         <button class="nav-item" data-view="ops" type="button">
           <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
           <span>机载运维</span>
+        </button>
+
+        <button class="nav-item" data-view="accounts" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>账号权限</span>
         </button>
 
         <button class="nav-item" data-view="settings" type="button">
@@ -85,57 +97,135 @@
       </div>
 
       <main class="content">
-        <!-- View 1: Devices & Active Jobs -->
+        <!-- View 1: Unified Fleet Overview & Anomaly Diagnostics -->
         <section class="view active" id="view-devices">
           <div class="metrics">
-            <div class="metric">
-              <div class="metric-label">登记设备</div>
+            <button class="metric metric-btn" id="metric-all" type="button">
+              <div class="metric-label">全部机器狗</div>
               <div class="metric-value" id="stat-devices">0</div>
+            </button>
+            <button class="metric metric-btn" id="metric-online" type="button">
+              <div class="metric-label">在线运行</div>
+              <div class="metric-value" id="stat-online">0</div>
+            </button>
+            <button class="metric metric-btn" id="metric-anomalies" type="button">
+              <div class="metric-label">异常告警</div>
+              <div class="metric-value" id="stat-anomalies">0</div>
+            </button>
+            <button class="metric metric-btn" id="metric-tunnels" type="button">
+              <div class="metric-label">在线隧道</div>
+              <div class="metric-value" id="stat-tunnels">0</div>
+            </button>
+          </div>
+
+          <div class="section-block hidden" id="fleet-patrol-card">
+            <div class="section-head">
+              <h2>巡检报告 <span class="sub-line" id="patrol-meta"></span></h2>
+              <button class="btn btn-ghost btn-sm" id="btn-patrol-close" type="button">收起</button>
             </div>
-            <div class="metric">
-              <div class="metric-label">云端版本</div>
-              <div class="metric-value" id="stat-releases">0</div>
-            </div>
-            <div class="metric">
-              <div class="metric-label">进行中灰度</div>
-              <div class="metric-value" id="stat-rollouts">0</div>
-            </div>
-            <div class="metric">
-              <div class="metric-label">App 正式版</div>
-              <div class="metric-value metric-value-sm" id="stat-android">—</div>
-            </div>
+            <div class="patrol-list" id="patrol-list"></div>
           </div>
 
           <div class="section-block hidden" id="active-jobs-block">
             <div class="section-head">
-              <h2>近期推送任务</h2>
+              <h2>进行中任务</h2>
+              <button class="btn btn-ghost btn-sm" id="btn-goto-jobs" type="button">查看全部任务</button>
             </div>
             <div class="job-list" id="job-list"></div>
           </div>
 
           <div class="section-block">
             <div class="section-head">
-              <h2>车队设备</h2>
+              <h2>全部机器狗</h2>
               <div class="section-actions">
-                <input class="search-input" id="device-search" type="search" placeholder="搜索设备编号、分环或版本" />
+                <input class="search-input" id="device-search" type="search" placeholder="搜索名称、序列号、归属邮箱或编号" />
+                <button class="btn btn-ghost btn-sm" id="btn-fleet-patrol" type="button">全车队巡检</button>
                 <button class="btn btn-primary btn-sm" id="btn-open-provision" type="button">新机签发</button>
                 <button class="btn btn-ghost btn-sm" id="btn-add-device" type="button">登记设备</button>
                 <button class="btn btn-ghost btn-sm" id="btn-manual-push" type="button">按编号推送</button>
+              </div>
+            </div>
+
+            <div class="filter-bar" id="fleet-filter-bar">
+              <div class="filter-pills" id="fleet-filter-chips">
+                <button type="button" class="filter-pill active" data-fleet-filter="all">全部</button>
+                <button type="button" class="filter-pill" data-fleet-filter="anomaly">仅异常</button>
+                <button type="button" class="filter-pill" data-fleet-filter="online">在线</button>
+                <button type="button" class="filter-pill" data-fleet-filter="offline">离线</button>
+                <button type="button" class="filter-pill" data-fleet-filter="canary">canary</button>
+                <button type="button" class="filter-pill" data-fleet-filter="prod">prod</button>
+              </div>
+              <label class="checkbox-label sub-line">
+                <input id="fleet-show-sim" type="checkbox" />
+                <span>含模拟机</span>
+              </label>
+            </div>
+
+            <div class="batch-bar hidden" id="batch-bar">
+              <strong id="batch-count-label">已选 0 台</strong>
+              <div class="batch-controls">
+                <select id="batch-ring-select" class="compact-select">
+                  <option value="canary">canary</option>
+                  <option value="prod">prod</option>
+                  <option value="dev">dev</option>
+                </select>
+                <button class="btn btn-ghost btn-sm" id="btn-batch-ring" type="button">批量改分环</button>
+                <select id="batch-release-select" class="compact-select" style="max-width:220px;"></select>
+                <button class="btn btn-primary btn-sm" id="btn-batch-push" type="button">批量推送</button>
+                <button class="btn btn-ghost btn-sm" id="btn-batch-clear" type="button">取消选择</button>
+              </div>
+            </div>
+
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th style="width:32px;"><input type="checkbox" id="fleet-check-all" aria-label="全选" /></th>
+                    <th>机器狗</th>
+                    <th>健康与异常</th>
+                    <th>链路状态</th>
+                    <th>分环与版本</th>
+                    <th>最近心跳</th>
+                    <th class="col-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="devices-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- View 1B: Persisted OTA Jobs History -->
+        <section class="view" id="view-jobs">
+          <div class="section-block">
+            <div class="section-head">
+              <h2>升级任务记录</h2>
+              <div class="section-actions">
+                <input class="search-input" id="jobs-search" type="search" placeholder="搜索机器狗、版本或报错" />
+              </div>
+            </div>
+            <div class="filter-bar">
+              <div class="filter-pills" id="jobs-filter-chips">
+                <button type="button" class="filter-pill active" data-jobs-filter="all">全部</button>
+                <button type="button" class="filter-pill" data-jobs-filter="active">进行中</button>
+                <button type="button" class="filter-pill" data-jobs-filter="failed">异常失败</button>
+                <button type="button" class="filter-pill" data-jobs-filter="waiting">等待安全窗</button>
+                <button type="button" class="filter-pill" data-jobs-filter="succeeded">已完成</button>
               </div>
             </div>
             <div class="table-wrap">
               <table class="data-table">
                 <thead>
                   <tr>
-                    <th>设备编号</th>
-                    <th>分环</th>
-                    <th>状态</th>
-                    <th>固件版本</th>
-                    <th>最近心跳</th>
+                    <th>机器狗</th>
+                    <th>目标版本</th>
+                    <th>阶段</th>
+                    <th>进度与说明</th>
+                    <th>更新时间</th>
                     <th class="col-actions">操作</th>
                   </tr>
                 </thead>
-                <tbody id="devices-tbody"></tbody>
+                <tbody id="jobs-history-tbody"></tbody>
               </table>
             </div>
           </div>
@@ -391,6 +481,32 @@
               <button class="btn btn-primary btn-sm" id="btn-ops-logs" type="button">拉取日志</button>
             </div>
             <pre class="log-box" id="ops-log-output">点击「拉取日志」查看实时输出</pre>
+          </div>
+        </section>
+
+        <!-- View 6B: Accounts & RBAC -->
+        <section class="view" id="view-accounts">
+          <div class="section-block">
+            <div class="section-head">
+              <h2>账号角色管理</h2>
+              <button class="btn btn-ghost btn-sm" id="btn-reload-accounts" type="button">刷新账号</button>
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>账号邮箱</th>
+                    <th>显示名</th>
+                    <th>名下机器狗</th>
+                    <th>角色</th>
+                    <th class="col-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="accounts-tbody">
+                  <tr><td colspan="5" class="empty-cell">加载中…</td></tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </section>
 
@@ -697,6 +813,58 @@
           <button class="btn btn-primary" type="submit">生成组合包</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Slide-over Drawer: Device 360° Diagnostics & Operations -->
+  <div class="drawer-backdrop hidden" id="drawer-device-detail">
+    <div class="drawer drawer-wide" role="dialog" aria-modal="true" aria-labelledby="det-title">
+      <div class="drawer-head">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+          <h2 id="det-title" style="truncate:ellipsis;">机器狗详情</h2>
+          <span id="det-health-badge"></span>
+        </div>
+        <button class="icon-btn" data-close-drawer="drawer-device-detail" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="drawer-body">
+        <div class="detail-actions-bar">
+          <button class="btn btn-primary btn-sm" id="btn-det-push" type="button">推送升级</button>
+          <button class="btn btn-ghost btn-sm" id="btn-det-ops" type="button">机载运维</button>
+          <button class="btn btn-ghost btn-sm" id="btn-det-errlogs" type="button">拉取近期报错</button>
+          <button class="btn btn-ghost btn-sm" id="btn-det-edit" type="button">编辑分环</button>
+        </div>
+
+        <div class="detail-section">
+          <div class="detail-section-title">健康诊断</div>
+          <div id="det-anomalies"></div>
+        </div>
+
+        <div class="detail-section">
+          <div class="detail-section-title">身份与归属</div>
+          <div class="detail-kv-grid" id="det-identity-grid"></div>
+          <div class="owner-edit-row">
+            <input id="det-owner-input" type="email" placeholder="输入归属账号邮箱，留空解绑" />
+            <button class="btn btn-ghost btn-sm" id="btn-det-save-owner" type="button">更新归属</button>
+          </div>
+        </div>
+
+        <div class="detail-section">
+          <div class="detail-section-title">三链路与实时状态</div>
+          <div class="detail-links-grid" id="det-links-grid"></div>
+        </div>
+
+        <div class="detail-section hidden" id="det-errlogs-section">
+          <div class="detail-section-title">近期警告与错误日志 <span class="sub-line" id="det-errlogs-meta"></span></div>
+          <pre class="log-box" id="det-errlogs-output" style="max-height:240px;"></pre>
+        </div>
+
+        <div class="detail-section">
+          <div class="detail-section-title">升级任务历史</div>
+          <div class="det-jobs-list" id="det-jobs-list"></div>
+        </div>
+      </div>
     </div>
   </div>
 

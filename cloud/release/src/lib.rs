@@ -229,6 +229,49 @@ pub struct Job {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct JobSummary {
+    pub job_id: String,
+    pub device_id: String,
+    pub release_id: String,
+    pub idempotency_key: String,
+    pub phase: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub bytes_downloaded: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_id: Option<String>,
+}
+
+impl From<&Job> for JobSummary {
+    fn from(job: &Job) -> Self {
+        Self {
+            job_id: job.job_id.clone(),
+            device_id: job.device_id.clone(),
+            release_id: job.release_id.clone(),
+            idempotency_key: job.idempotency_key.clone(),
+            phase: job.phase.clone(),
+            created_at_ms: job.created_at_ms,
+            updated_at_ms: job.updated_at_ms,
+            bytes_downloaded: job.bytes_downloaded,
+            current_version: job.current_version.clone(),
+            message: job.message.clone(),
+            rollout_id: job.rollout_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ListJobsQuery {
+    device_id: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AndroidAppReleaseTemplate {
     pub channel: String,
     pub version_name: String,
@@ -442,8 +485,12 @@ pub fn build_router(config: Config) -> Result<Router> {
             "/v1/agent/devices/{device_id}/status",
             post(agent_report_device_status),
         )
+        .route("/v1/jobs", get(list_jobs))
         .route("/v1/devices/{device_id}/firmware/releases", get(releases))
-        .route("/v1/devices/{device_id}/firmware/jobs", post(start_job))
+        .route(
+            "/v1/devices/{device_id}/firmware/jobs",
+            post(start_job).get(list_device_jobs),
+        )
         .route(
             "/v1/devices/{device_id}/firmware/jobs/{job_id}",
             get(read_job),
@@ -1376,6 +1423,66 @@ async fn start_job(
     }
     jobs.insert(job.job_id.clone(), job.clone());
     (StatusCode::ACCEPTED, Json(job)).into_response()
+}
+
+async fn list_jobs(State(state): State<AppState>, Query(query): Query<ListJobsQuery>) -> Response {
+    let filter_device = match query
+        .device_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => match validate_device_id(raw) {
+            Ok(id) => Some(id.to_string()),
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        },
+        None => None,
+    };
+    let limit = query.limit.unwrap_or(150).clamp(1, 500);
+    let jobs = state.jobs.lock().await;
+    let mut items: Vec<JobSummary> = jobs
+        .values()
+        .filter(|job| {
+            filter_device
+                .as_deref()
+                .is_none_or(|dev| job.device_id == dev)
+        })
+        .map(JobSummary::from)
+        .collect();
+    items.sort_by(|a, b| {
+        b.updated_at_ms
+            .max(b.created_at_ms)
+            .cmp(&a.updated_at_ms.max(a.created_at_ms))
+            .then_with(|| b.created_at_ms.cmp(&a.created_at_ms))
+    });
+    items.truncate(limit);
+    (StatusCode::OK, Json(items)).into_response()
+}
+
+async fn list_device_jobs(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Query(query): Query<ListJobsQuery>,
+) -> Response {
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let jobs = state.jobs.lock().await;
+    let mut items: Vec<JobSummary> = jobs
+        .values()
+        .filter(|job| job.device_id == clean_id)
+        .map(JobSummary::from)
+        .collect();
+    items.sort_by(|a, b| {
+        b.updated_at_ms
+            .max(b.created_at_ms)
+            .cmp(&a.updated_at_ms.max(a.created_at_ms))
+            .then_with(|| b.created_at_ms.cmp(&a.created_at_ms))
+    });
+    items.truncate(limit);
+    (StatusCode::OK, Json(items)).into_response()
 }
 
 async fn read_job(
@@ -4493,5 +4600,103 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(mismatch.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_jobs_returns_persisted_jobs_sorted_and_filtered() {
+        let dir = TestDir::new();
+        let (config, _key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "dog-01": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "canary" }
+            }),
+            base_template_manifest("rel-1", 0, 0),
+            "firmware/qa/rel-1/brainstem.tar.gz",
+            "rel-1",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        // Unauthenticated request must be rejected.
+        let unauth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/jobs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // Start a job on dog-01 and verify it appears in both /v1/jobs and /v1/devices/{id}/firmware/jobs.
+        let start = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/devices/dog-01/firmware/jobs")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"releaseId": "rel-1", "idempotencyKey": "list-test-1"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(start.status(), StatusCode::ACCEPTED);
+        let started: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(start.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let job_id = started["jobId"].as_str().unwrap().to_string();
+
+        let all = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/jobs?limit=10")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(all.status(), StatusCode::OK);
+        let list: Vec<serde_json::Value> =
+            serde_json::from_slice(&axum::body::to_bytes(all.into_body(), 65536).await.unwrap())
+                .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["jobId"], job_id);
+        assert!(list[0].get("manifest").is_none());
+
+        let per_dev = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/dog-01/firmware/jobs")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(per_dev.status(), StatusCode::OK);
+        let dev_list: Vec<serde_json::Value> = serde_json::from_slice(
+            &axum::body::to_bytes(per_dev.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dev_list.len(), 1);
+        assert_eq!(dev_list[0]["deviceId"], "dog-01");
     }
 }

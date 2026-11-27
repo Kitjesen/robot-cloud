@@ -17,14 +17,23 @@
     opsQuickDirs: [],
     opsPath: "/opt/doso",
     opsConnected: false,
+    fleetFilter: "all",
+    showSimulated: false,
+    selectedDevices: new Set(),
+    jobsFilter: "all",
+    detailDeviceId: null,
+    accountsLoaded: false,
+    accounts: [],
   };
 
   const VIEW_META = {
-    devices: { title: "设备车队", cta: "发布固件" },
+    devices: { title: "车队总览", cta: "发布固件" },
+    jobs: { title: "升级任务", cta: "发布固件" },
     releases: { title: "机器狗版本", cta: "发布固件" },
     rollouts: { title: "灰度发布", cta: "新建灰度" },
     android: { title: "App 更新", cta: null },
     ops: { title: "机载运维", cta: null },
+    accounts: { title: "账号权限", cta: null },
     settings: { title: "云端配置", cta: null },
   };
 
@@ -205,6 +214,9 @@
     if (viewName === "ops" && !STATE.opsTunnels.length) {
       scanOpsTunnels(true);
     }
+    if (viewName === "accounts" && !STATE.accountsLoaded) {
+      loadAccounts(true);
+    }
   }
 
   function openDrawer(id) {
@@ -216,6 +228,9 @@
   }
 
   function mergeFleetDevices(ov) {
+    if (Array.isArray(ov?.fleet) && ov.fleet.length) {
+      return ov.fleet;
+    }
     const statusMap = new Map();
     for (const st of ov?.devices || []) {
       statusMap.set(st.deviceId, st);
@@ -225,28 +240,53 @@
     for (const reg of ov?.registeredDevices || []) {
       seen.add(reg.deviceId);
       const st = statusMap.get(reg.deviceId);
+      const online = st && st.lastSeenAgeMs !== null && st.lastSeenAgeMs !== undefined && st.lastSeenAgeMs <= 120000;
       merged.push({
         deviceId: reg.deviceId,
+        displayName: reg.deviceId.slice(0, 8),
+        serialNumber: "",
+        ownerEmail: "",
+        isSimulated: false,
+        inInventory: false,
+        otaRegistered: true,
         model: reg.model,
         hardwareRevision: reg.hardwareRevision,
         ring: reg.ring || "prod",
         enabled: reg.enabled !== false,
         tags: reg.tags || [],
-        registered: true,
-        status: st || null,
+        otaOnline: Boolean(online),
+        otaStatus: st || null,
+        cloudReachable: false,
+        tunnelPort: null,
+        healthLevel: online ? "ok" : "offline",
+        anomalies: [],
+        hasAnomaly: false,
+        recentJobs: [],
       });
     }
     for (const st of ov?.devices || []) {
       if (!seen.has(st.deviceId)) {
         merged.push({
           deviceId: st.deviceId,
+          displayName: st.deviceId.slice(0, 8),
+          serialNumber: "",
+          ownerEmail: "",
+          isSimulated: false,
+          inInventory: false,
+          otaRegistered: false,
           model: "",
           hardwareRevision: "",
           ring: "prod",
           enabled: true,
           tags: [],
-          registered: false,
-          status: st,
+          otaOnline: true,
+          otaStatus: st,
+          cloudReachable: false,
+          tunnelPort: null,
+          healthLevel: "ok",
+          anomalies: [],
+          hasAnomaly: false,
+          recentJobs: [],
         });
       }
     }
@@ -291,19 +331,49 @@
 
   function renderMetrics(ov) {
     const fleet = mergeFleetDevices(ov);
+    const real = fleet.filter((d) => !d.isSimulated);
+    const sum = ov.fleetSummary || {};
     const releases = ov.releases || [];
     const rollouts = ov.rollouts || [];
-    const activeRollouts = rollouts.filter((r) => r.status === "active").length;
-    const prodApp = ov.android?.prod;
+    const jobs = ov.jobs || ov.trackedJobs || [];
+    const totalReal = sum.totalReal ?? real.length;
+    const onlineCount = sum.onlineCount ?? real.filter((d) => d.otaOnline || d.cloudReachable || d.tunnelPort).length;
+    const anomalyCount = sum.anomalyCount ?? real.filter((d) => d.hasAnomaly).length;
+    const tunnelCount = sum.tunnelCount ?? (ov.tunnelPorts || []).length;
 
-    $("stat-devices").textContent = String(fleet.length);
-    $("stat-releases").textContent = String(releases.length);
-    $("stat-rollouts").textContent = String(activeRollouts);
-    $("stat-android").textContent = prodApp ? `v${prodApp.versionName} (${prodApp.versionCode})` : "未发布";
+    $("stat-devices").textContent = String(totalReal);
+    $("stat-online").textContent = String(onlineCount);
+    $("stat-anomalies").textContent = String(anomalyCount);
+    $("stat-anomalies").classList.toggle("metric-value-err", anomalyCount > 0);
+    $("stat-tunnels").textContent = String(tunnelCount);
 
-    $("nav-count-devices").textContent = String(fleet.length);
+    $("nav-count-devices").textContent = String(totalReal);
+    const navAlert = $("nav-alert-devices");
+    if (anomalyCount > 0) {
+      navAlert.textContent = String(anomalyCount);
+      navAlert.classList.remove("hidden");
+    } else {
+      navAlert.classList.add("hidden");
+    }
+    const attentionJobs = jobs.filter(
+      (j) => ACTIVE_PHASES.has(j.phase) || j.phase === "failed" || j.phase === "rolled_back" || j.phase === "recovery_required"
+    ).length;
+    $("nav-count-jobs").textContent = String(attentionJobs || jobs.length);
     $("nav-count-releases").textContent = String(releases.length);
     $("nav-count-rollouts").textContent = String(rollouts.length);
+
+    // Sync batch release selector
+    const batchSel = $("batch-release-select");
+    if (batchSel) {
+      const prev = batchSel.value;
+      const sorted = [...releases].sort((a, b) => Number(b.sequence || 0) - Number(a.sequence || 0));
+      batchSel.innerHTML = sorted.length
+        ? sorted
+            .map((r) => `<option value="${esc(r.releaseId)}">${esc(r.releaseId)} (${esc(r.channel)})</option>`)
+            .join("")
+        : `<option value="">暂无可用版本</option>`;
+      if (prev && sorted.some((r) => r.releaseId === prev)) batchSel.value = prev;
+    }
   }
 
   function renderTrackedJobs(jobs) {
@@ -345,62 +415,391 @@
       .join("");
   }
 
+  function healthBadgeHtml(d) {
+    if (!d.enabled) return `<span class="badge badge-err">已停用</span>`;
+    if (d.healthLevel === "critical") return `<span class="badge badge-err"><span class="dot dot-err"></span>严重异常</span>`;
+    if (d.healthLevel === "warn") return `<span class="badge badge-warn"><span class="dot dot-warn"></span>存在告警</span>`;
+    if (d.healthLevel === "ok") return `<span class="badge badge-ok"><span class="dot dot-ok"></span>运行正常</span>`;
+    return `<span class="badge badge-neutral"><span class="dot dot-neutral"></span>离线</span>`;
+  }
+
+  function syncBatchBar() {
+    const count = STATE.selectedDevices.size;
+    $("batch-count-label").textContent = `已选 ${count} 台`;
+    $("batch-bar").classList.toggle("hidden", count === 0);
+  }
+
   function renderDevices(ov) {
     const fleet = mergeFleetDevices(ov);
     const q = ($("device-search").value || "").trim().toLowerCase();
     const filtered = fleet.filter((d) => {
+      if (!STATE.showSimulated && d.isSimulated) return false;
+      if (STATE.fleetFilter === "anomaly" && !d.hasAnomaly) return false;
+      if (STATE.fleetFilter === "online" && !(d.otaOnline || d.cloudReachable || d.tunnelPort)) return false;
+      if (STATE.fleetFilter === "offline" && (d.otaOnline || d.cloudReachable || d.tunnelPort)) return false;
+      if (STATE.fleetFilter === "canary" && d.ring !== "canary") return false;
+      if (STATE.fleetFilter === "prod" && d.ring !== "prod") return false;
       if (!q) return true;
+      const st = d.otaStatus || d.status;
       return (
         String(d.deviceId || "").toLowerCase().includes(q) ||
+        String(d.displayName || "").toLowerCase().includes(q) ||
+        String(d.serialNumber || "").toLowerCase().includes(q) ||
+        String(d.ownerEmail || "").toLowerCase().includes(q) ||
         String(d.ring || "").toLowerCase().includes(q) ||
-        String(d.status?.firmwareVersion || "").toLowerCase().includes(q) ||
-        (d.tags || []).join(" ").toLowerCase().includes(q)
+        String(st?.firmwareVersion || "").toLowerCase().includes(q) ||
+        (d.tags || []).join(" ").toLowerCase().includes(q) ||
+        (d.anomalies || []).map((a) => a.label).join(" ").toLowerCase().includes(q)
       );
     });
 
     const datalist = $("known-devices-list");
-    datalist.innerHTML = fleet.map((d) => `<option value="${esc(d.deviceId)}"></option>`).join("");
+    datalist.innerHTML = fleet
+      .map((d) => `<option value="${esc(d.deviceId)}">${esc(d.displayName)} ${esc(d.serialNumber)}</option>`)
+      .join("");
 
     const tbody = $("devices-tbody");
     if (!filtered.length) {
-      tbody.innerHTML = `<tr><td colspan="6" class="empty-cell">暂无已登记设备</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="empty-cell">暂无匹配的机器狗</td></tr>`;
+      syncBatchBar();
       return;
     }
 
     tbody.innerHTML = filtered
       .map((d) => {
-        const st = d.status;
-        const online = st && st.lastSeenAgeMs !== null && st.lastSeenAgeMs !== undefined && st.lastSeenAgeMs < 120000;
-        const ready = st && st.brainstemReady && st.strategyReady;
-        const statusBadge = !d.enabled
-          ? `<span class="badge badge-err">已停用</span>`
-          : online
-          ? ready
-            ? `<span class="badge badge-ok"><span class="dot dot-ok"></span>在线就绪</span>`
-            : `<span class="badge badge-warn"><span class="dot dot-warn"></span>在线未就绪</span>`
-          : `<span class="badge badge-neutral"><span class="dot dot-neutral"></span>离线</span>`;
+        const st = d.otaStatus || d.status;
+        const primaryAnom = (d.anomalies || []).find((a) => a.level === "critical" || a.level === "warn");
+        const extraAnomCount = (d.anomalies || []).filter((a) => a.level === "critical" || a.level === "warn").length - 1;
         const ringCls = d.ring === "prod" ? "badge-info" : d.ring === "canary" ? "badge-warn" : "badge-neutral";
-        const tagsLine = (d.tags || []).length ? (d.tags || []).join(" · ") : d.model || "";
+        const checked = STATE.selectedDevices.has(d.deviceId) ? "checked" : "";
+        const subMeta = [d.serialNumber, d.ownerEmail, d.isSimulated ? "模拟机" : ""].filter(Boolean).join(" · ");
+        const otaPill = d.otaOnline
+          ? `<span class="link-pill on">OTA</span>`
+          : d.otaRegistered
+          ? `<span class="link-pill">OTA</span>`
+          : `<span class="link-pill warn">无OTA</span>`;
+        const cloudPill = d.cloudReachable ? `<span class="link-pill on">云端</span>` : `<span class="link-pill">云端</span>`;
+        const tunPill = d.tunnelPort
+          ? `<span class="link-pill on">:${esc(d.tunnelPort)}</span>`
+          : `<span class="link-pill">隧道</span>`;
+        const hbAge = st?.lastSeenAgeMs !== undefined ? formatAge(st.lastSeenAgeMs) : d.telemetry?.lastSeenAt ? formatTime(Date.parse(d.telemetry.lastSeenAt)) : "—";
+
         return `
-          <tr>
+          <tr class="row-clickable" data-row-device="${esc(d.deviceId)}">
+            <td><input type="checkbox" class="fleet-row-check" value="${esc(d.deviceId)}" ${checked} /></td>
             <td>
-              <div class="mono">${esc(d.deviceId)}</div>
-              <div class="sub-line">${esc(tagsLine)}</div>
+              <div><strong>${esc(d.displayName || d.deviceId.slice(0, 8))}</strong></div>
+              <div class="sub-line">${esc(subMeta || d.deviceId)}</div>
             </td>
-            <td><span class="badge ${ringCls}">${esc(d.ring)}</span></td>
-            <td>${statusBadge}</td>
             <td>
-              <div>${esc(st?.firmwareVersion || "—")}</div>
-              <div class="sub-line mono">${esc(st?.releaseId || "")}</div>
+              <div>${healthBadgeHtml(d)}</div>
+              ${
+                primaryAnom
+                  ? `<div class="sub-line" style="margin-top:3px;color:${
+                      primaryAnom.level === "critical" ? "var(--err-text)" : "var(--warn-text)"
+                    }">${esc(primaryAnom.label)}${extraAnomCount > 0 ? ` +${extraAnomCount}` : ""}</div>`
+                  : ""
+              }
             </td>
-            <td>${esc(formatAge(st?.lastSeenAgeMs))}</td>
+            <td><div class="link-pills">${otaPill}${cloudPill}${tunPill}</div></td>
+            <td>
+              <span class="badge ${ringCls}">${esc(d.ring)}</span>
+              <span style="margin-left:6px;">${esc(st?.firmwareVersion || "—")}</span>
+              <div class="sub-line mono">${esc(d.hardwareRevision || d.model || "")}</div>
+            </td>
+            <td>${esc(hbAge)}</td>
             <td class="col-actions">
-              <button class="btn btn-sm btn-ghost" data-edit-device="${esc(d.deviceId)}" type="button">编辑</button>
-              <button class="btn btn-sm btn-ghost" data-push-device="${esc(d.deviceId)}" type="button">推送更新</button>
+              <button class="btn btn-sm btn-ghost" data-detail-device="${esc(d.deviceId)}" type="button">详情</button>
+              ${
+                d.tunnelPort
+                  ? `<button class="btn btn-sm btn-ghost" data-jump-ops-port="${esc(d.tunnelPort)}" type="button">运维</button>`
+                  : ""
+              }
+              <button class="btn btn-sm btn-ghost" data-push-device="${esc(d.deviceId)}" type="button">推送</button>
             </td>
           </tr>`;
       })
       .join("");
+    syncBatchBar();
+  }
+
+  function renderJobsHistory(ov) {
+    const jobs = ov?.jobs || ov?.trackedJobs || [];
+    const fleetMap = new Map(mergeFleetDevices(ov).map((d) => [d.deviceId, d]));
+    const q = ($("jobs-search")?.value || "").trim().toLowerCase();
+    const filtered = jobs.filter((j) => {
+      const ph = String(j.phase || "");
+      if (STATE.jobsFilter === "active" && !ACTIVE_PHASES.has(ph)) return false;
+      if (STATE.jobsFilter === "failed" && !["failed", "rolled_back", "recovery_required"].includes(ph)) return false;
+      if (STATE.jobsFilter === "waiting" && ph !== "waiting_safe_window") return false;
+      if (STATE.jobsFilter === "succeeded" && ph !== "succeeded") return false;
+      if (!q) return true;
+      const dev = fleetMap.get(j.deviceId);
+      return (
+        String(j.deviceId || "").toLowerCase().includes(q) ||
+        String(dev?.displayName || "").toLowerCase().includes(q) ||
+        String(dev?.serialNumber || "").toLowerCase().includes(q) ||
+        String(j.releaseId || "").toLowerCase().includes(q) ||
+        String(j.message || "").toLowerCase().includes(q)
+      );
+    });
+
+    const tbody = $("jobs-history-tbody");
+    if (!tbody) return;
+    if (!filtered.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="empty-cell">暂无匹配的升级记录</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtered
+      .map((j) => {
+        const dev = fleetMap.get(j.deviceId);
+        const info = PHASE_MAP[j.phase] || { label: j.phase, cls: "badge-neutral" };
+        const canCancel = CANCELLABLE_PHASES.has(j.phase);
+        const canRetry = ["failed", "rolled_back", "cancelled"].includes(j.phase);
+        return `
+          <tr>
+            <td>
+              <div><strong>${esc(dev?.displayName || j.deviceId.slice(0, 8))}</strong></div>
+              <div class="sub-line mono">${esc(dev?.serialNumber || j.deviceId)}</div>
+            </td>
+            <td class="mono">${esc(j.releaseId)}</td>
+            <td><span class="badge ${info.cls}">${esc(info.label)}</span></td>
+            <td>
+              <div>${j.bytesDownloaded ? formatBytes(j.bytesDownloaded) : "—"}</div>
+              <div class="sub-line">${esc(j.message || "")}</div>
+            </td>
+            <td>${esc(formatTime(j.updatedAtMs || j.createdAtMs))}</td>
+            <td class="col-actions">
+              ${
+                canCancel
+                  ? `<button class="btn btn-sm btn-danger" data-cancel-job="${esc(j.jobId)}" data-cancel-dev="${esc(
+                      j.deviceId
+                    )}" type="button">取消</button>`
+                  : ""
+              }
+              ${
+                canRetry
+                  ? `<button class="btn btn-sm btn-ghost" data-retry-dev="${esc(j.deviceId)}" data-retry-rel="${esc(
+                      j.releaseId
+                    )}" type="button">重试</button>`
+                  : ""
+              }
+              <button class="btn btn-sm btn-ghost" data-detail-device="${esc(j.deviceId)}" type="button">设备</button>
+            </td>
+          </tr>`;
+      })
+      .join("");
+  }
+
+  function renderPatrolReport(report) {
+    const card = $("fleet-patrol-card");
+    const list = $("patrol-list");
+    $("patrol-meta").textContent = `${formatTime(report.checkedAtMs)} · 在线 ${report.total} 台 · 异常 ${report.issueCount} 台`;
+    if (!report.items || !report.items.length) {
+      list.innerHTML = `<div class="empty-cell">当前没有在线的运维隧道机器狗</div>`;
+    } else {
+      list.innerHTML = report.items
+        .map((it) => {
+          const badge =
+            it.level === "critical"
+              ? `<span class="badge badge-err">异常</span>`
+              : it.level === "warn"
+              ? `<span class="badge badge-warn">告警</span>`
+              : `<span class="badge badge-ok">健康</span>`;
+          const h = it.health || {};
+          const svcsOk = (it.services || []).filter((s) => s.state === "active").length;
+          const vbus = typeof h.vbus_min_v === "number" && h.vbus_min_v > 0 ? `${h.vbus_min_v.toFixed(1)}V` : "—";
+          const disk = it.disk?.usePercent || "—";
+          const issueTxt = (it.issues || []).map((x) => x.label).join(" · ") || "4 服务正常，近 1 小时无错误日志";
+          return `
+            <div class="patrol-row">
+              <div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  <strong>${esc(it.displayName)}</strong>
+                  <span class="mono sub-line">:${esc(it.port)}</span>
+                  ${badge}
+                </div>
+                <div class="sub-line" style="margin-top:4px;">服务 ${svcsOk}/${(it.services || []).length} · 磁盘 ${esc(
+            disk
+          )} · 电压 ${esc(vbus)} · 近1h错误 ${esc(it.recentErrorCount)} 条</div>
+                <div class="sub-line" style="margin-top:2px;color:${it.issues?.length ? "var(--warn-text)" : "var(--ok-text)"}">${esc(
+            issueTxt
+          )}</div>
+              </div>
+              <div style="display:flex;gap:6px;">
+                <button class="btn btn-sm btn-ghost" data-jump-ops-port="${esc(it.port)}" type="button">进入运维</button>
+                ${
+                  it.deviceId
+                    ? `<button class="btn btn-sm btn-ghost" data-detail-device="${esc(it.deviceId)}" type="button">详情</button>`
+                    : ""
+                }
+              </div>
+            </div>`;
+        })
+        .join("");
+    }
+    card.classList.remove("hidden");
+  }
+
+  function openDeviceDetailDrawer(deviceId) {
+    const fleet = mergeFleetDevices(STATE.overview);
+    const d = fleet.find((x) => x.deviceId === deviceId);
+    if (!d) return;
+    STATE.detailDeviceId = deviceId;
+    $("det-title").textContent = d.displayName || d.deviceId;
+    $("det-health-badge").innerHTML = healthBadgeHtml(d);
+    $("det-errlogs-section").classList.add("hidden");
+    $("btn-det-ops").disabled = !d.tunnelPort;
+    $("btn-det-errlogs").disabled = !d.tunnelPort;
+
+    // Anomalies
+    const anomWrap = $("det-anomalies");
+    if (!d.anomalies || !d.anomalies.length) {
+      anomWrap.innerHTML = `<div class="anomaly-item" style="border-color:#bbf7d0;background:var(--ok-bg);color:var(--ok-text);"><strong>各项指标正常</strong><span>未检测到硬件、链路或升级异常</span></div>`;
+    } else {
+      anomWrap.innerHTML = d.anomalies
+        .map((a) => {
+          const cls = a.level === "critical" ? "badge-err" : a.level === "warn" ? "badge-warn" : "badge-info";
+          return `<div class="anomaly-item"><span class="badge ${cls}">${esc(a.label)}</span><span>${esc(a.detail)}</span></div>`;
+        })
+        .join("");
+    }
+
+    // Identity
+    $("det-identity-grid").innerHTML = [
+      ["设备 UUID", `<span class="mono">${esc(d.deviceId)}</span>`],
+      ["出厂序列号", esc(d.serialNumber || "未入库存")],
+      ["机型 / 硬件", esc([d.model, d.hardwareRevision].filter(Boolean).join(" · ") || "—")],
+      ["发布分环 / 标签", `${esc(d.ring)} ${d.tags?.length ? `· ${esc(d.tags.join(", "))}` : ""}`],
+    ]
+      .map(([k, v]) => `<div><div class="detail-kv-label">${k}</div><div>${v}</div></div>`)
+      .join("");
+    $("det-owner-input").value = d.ownerEmail || "";
+    $("det-owner-input").disabled = !d.inInventory;
+    $("btn-det-save-owner").disabled = !d.inInventory;
+
+    // 3-Link live grid
+    const st = d.otaStatus || {};
+    const tel = d.telemetry || {};
+    const locTxt = tel.location ? `${Number(tel.location.lat).toFixed(4)}, ${Number(tel.location.lon).toFixed(4)}` : "—";
+    $("det-links-grid").innerHTML = `
+      <div class="detail-link-card">
+        <div><strong>OTA 链路</strong> ${d.otaOnline ? `<span class="badge badge-ok">在线</span>` : `<span class="badge badge-neutral">离线</span>`}</div>
+        <div>固件：${esc(st.firmwareVersion || "—")}</div>
+        <div>主控：${st.brainstemReady === true ? "就绪" : st.brainstemReady === false ? "未就绪" : "—"}</div>
+        <div>心跳：${esc(formatAge(st.lastSeenAgeMs))}</div>
+      </div>
+      <div class="detail-link-card">
+        <div><strong>云端遥测</strong> ${d.cloudReachable ? `<span class="badge badge-ok">在线</span>` : `<span class="badge badge-neutral">离线</span>`}</div>
+        <div>状态：${esc(tel.cmsState || "—")}</div>
+        <div>电机：${tel.motorOutputEnabled === true ? "已使能" : tel.motorOutputEnabled === false ? "未使能" : "—"}</div>
+        <div>位置：${esc(locTxt)}</div>
+      </div>
+      <div class="detail-link-card">
+        <div><strong>运维隧道</strong> ${d.tunnelPort ? `<span class="badge badge-ok">:${esc(d.tunnelPort)}</span>` : `<span class="badge badge-neutral">未连接</span>`}</div>
+        <div>预期端口：${d.expectedTunnelPort ? `:${esc(d.expectedTunnelPort)}` : "—"}</div>
+        <div>可远程操控服务、文件与日志</div>
+      </div>
+    `;
+
+    // Persisted job history for this device
+    const jobsBox = $("det-jobs-list");
+    const devJobs = d.recentJobs || [];
+    if (!devJobs.length) {
+      jobsBox.innerHTML = `<div class="sub-line">暂无历史升级记录</div>`;
+    } else {
+      jobsBox.innerHTML = devJobs
+        .map((j) => {
+          const info = PHASE_MAP[j.phase] || { label: j.phase, cls: "badge-neutral" };
+          const canCancel = CANCELLABLE_PHASES.has(j.phase);
+          return `
+            <div class="det-job-row">
+              <div>
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <span class="mono">${esc(j.releaseId)}</span>
+                  <span class="badge ${info.cls}">${esc(info.label)}</span>
+                </div>
+                <div class="sub-line">${esc(formatTime(j.updatedAtMs || j.createdAtMs))}${
+            j.bytesDownloaded ? ` · ${formatBytes(j.bytesDownloaded)}` : ""
+          }${j.message ? ` · ${esc(j.message)}` : ""}</div>
+              </div>
+              ${
+                canCancel
+                  ? `<button class="btn btn-sm btn-danger" data-cancel-job="${esc(j.jobId)}" data-cancel-dev="${esc(
+                      j.deviceId
+                    )}" type="button">取消</button>`
+                  : ""
+              }
+            </div>`;
+        })
+        .join("");
+    }
+    openDrawer("drawer-device-detail");
+  }
+
+  async function jumpToOpsTunnel(port) {
+    setView("ops");
+    setOpsMode("tunnel");
+    await scanOpsTunnels(true);
+    const sel = $("ops-tunnel-select");
+    if (sel) sel.value = String(port);
+    await connectOpsRobot();
+  }
+
+  async function loadAccounts(silent = false) {
+    const tbody = $("accounts-tbody");
+    if (!tbody) return;
+    if (!silent) tbody.innerHTML = `<tr><td colspan="5" class="empty-cell">加载中…</td></tr>`;
+    try {
+      const res = await apiFetch("/api/accounts");
+      STATE.accounts = res.accounts || [];
+      STATE.accountsLoaded = true;
+      const primary = (res.primaryAdminEmail || "").toLowerCase();
+      if (!STATE.accounts.length) {
+        tbody.innerHTML = `<tr><td colspan="5" class="empty-cell">暂无账号</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = STATE.accounts
+        .map((acc) => {
+          const isPrimary = String(acc.email || "").toLowerCase() === primary;
+          const roleBadge =
+            acc.appRole === "admin"
+              ? `<span class="badge badge-info">管理员</span>`
+              : acc.appRole === "support"
+              ? `<span class="badge badge-warn">技术支持</span>`
+              : `<span class="badge badge-neutral">普通用户</span>`;
+          const devsTxt = (acc.devices || []).length ? acc.devices.join("、") : "无";
+          return `
+            <tr>
+              <td>
+                <div>${esc(acc.email || acc.id)} ${isPrimary ? `<span class="badge badge-ok">主管理员</span>` : ""}</div>
+                <div class="sub-line mono">${esc(acc.id)}</div>
+              </td>
+              <td>${esc(acc.displayName || "—")}</td>
+              <td>${esc(devsTxt)}</td>
+              <td>
+                <div style="display:flex;align-items:center;gap:8px;">
+                  ${roleBadge}
+                  <select class="compact-select" data-role-select="${esc(acc.id)}" ${isPrimary ? "disabled" : ""}>
+                    <option value="user" ${acc.appRole === "user" ? "selected" : ""}>普通用户 (user)</option>
+                    <option value="support" ${acc.appRole === "support" ? "selected" : ""}>技术支持 (support)</option>
+                    <option value="admin" ${acc.appRole === "admin" ? "selected" : ""}>管理员 (admin)</option>
+                  </select>
+                </div>
+              </td>
+              <td class="col-actions">
+                <button class="btn btn-sm btn-ghost" data-save-role="${esc(acc.id)}" data-save-email="${esc(
+            acc.email
+          )}" type="button" ${isPrimary ? "disabled" : ""}>保存角色</button>
+              </td>
+            </tr>`;
+        })
+        .join("");
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty-cell" style="color:var(--err-text)">${esc(err.message)}</td></tr>`;
+      if (!silent) toast(err.message, "err");
+    }
   }
 
   function renderReleases(releases) {
@@ -638,10 +1037,14 @@
       renderMetrics(ov);
       renderTrackedJobs(ov.trackedJobs);
       renderDevices(ov);
+      renderJobsHistory(ov);
       renderReleases(ov.releases);
       renderRollouts(ov.rollouts);
       renderAndroidChannels(ov.android);
       populateSettingsForm(ov.config);
+      if (STATE.detailDeviceId && !$("drawer-device-detail").classList.contains("hidden")) {
+        openDeviceDetailDrawer(STATE.detailDeviceId);
+      }
       scheduleJobPolling();
     } catch (err) {
       if (!silent) toast(err.message, "err");
@@ -1249,10 +1652,126 @@
       }
     });
 
+    // Metric card quick filters & fleet filter bar
+    function setFleetFilter(val) {
+      STATE.fleetFilter = val;
+      document.querySelectorAll("#fleet-filter-chips .filter-pill").forEach((b) => {
+        b.classList.toggle("active", b.dataset.fleetFilter === val);
+      });
+      renderDevices(STATE.overview);
+    }
+    $("metric-all").addEventListener("click", () => setFleetFilter("all"));
+    $("metric-online").addEventListener("click", () => setFleetFilter("online"));
+    $("metric-anomalies").addEventListener("click", () => setFleetFilter("anomaly"));
+    $("metric-tunnels").addEventListener("click", () => setView("ops"));
+    $("btn-goto-jobs").addEventListener("click", () => setView("jobs"));
+
+    document.querySelectorAll("#fleet-filter-chips .filter-pill").forEach((b) => {
+      b.addEventListener("click", () => setFleetFilter(b.dataset.fleetFilter));
+    });
+    $("fleet-show-sim").addEventListener("change", () => {
+      STATE.showSimulated = $("fleet-show-sim").checked;
+      renderDevices(STATE.overview);
+    });
+
+    // Fleet Patrol
+    $("btn-patrol-close").addEventListener("click", () => $("fleet-patrol-card").classList.add("hidden"));
+    $("btn-fleet-patrol").addEventListener("click", async () => {
+      const btn = $("btn-fleet-patrol");
+      btn.disabled = true;
+      btn.textContent = "巡检中…";
+      try {
+        const report = await apiFetch("/api/fleet/patrol", { json: {} });
+        renderPatrolReport(report);
+        toast(`巡检完成：${report.total} 台在线，${report.issueCount} 台存在告警`, report.issueCount ? "info" : "ok");
+      } catch (err) {
+        toast(err.message, "err");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "全车队巡检";
+      }
+    });
+    $("patrol-list").addEventListener("click", (e) => {
+      const opsBtn = e.target.closest("[data-jump-ops-port]");
+      if (opsBtn) {
+        jumpToOpsTunnel(Number(opsBtn.dataset.jumpOpsPort));
+        return;
+      }
+      const detBtn = e.target.closest("[data-detail-device]");
+      if (detBtn) openDeviceDetailDrawer(detBtn.dataset.detailDevice);
+    });
+
+    // Batch Selection & Actions
+    $("fleet-check-all").addEventListener("change", () => {
+      const checked = $("fleet-check-all").checked;
+      document.querySelectorAll(".fleet-row-check").forEach((cb) => {
+        cb.checked = checked;
+        if (checked) STATE.selectedDevices.add(cb.value);
+        else STATE.selectedDevices.delete(cb.value);
+      });
+      syncBatchBar();
+    });
+    $("btn-batch-clear").addEventListener("click", () => {
+      STATE.selectedDevices.clear();
+      $("fleet-check-all").checked = false;
+      renderDevices(STATE.overview);
+    });
+    $("btn-batch-ring").addEventListener("click", async () => {
+      const ids = Array.from(STATE.selectedDevices);
+      if (!ids.length) return;
+      const ring = $("batch-ring-select").value;
+      if (!window.confirm(`确认将已选 ${ids.length} 台机器狗切换至 ${ring} 环？`)) return;
+      try {
+        const res = await apiFetch("/api/fleet/batch-ring", { json: { deviceIds: ids, ring } });
+        const okCnt = (res.results || []).filter((x) => x.ok).length;
+        toast(`已更新 ${okCnt}/${ids.length} 台设备分环为 ${ring}`, "ok");
+        STATE.selectedDevices.clear();
+        await refreshAll(true);
+      } catch (err) {
+        toast(err.message, "err");
+      }
+    });
+    $("btn-batch-push").addEventListener("click", async () => {
+      const ids = Array.from(STATE.selectedDevices);
+      const releaseId = $("batch-release-select").value;
+      if (!ids.length || !releaseId) {
+        toast("请先选择设备与目标版本", "err");
+        return;
+      }
+      if (!window.confirm(`确认向已选 ${ids.length} 台机器狗批量推送 ${releaseId}？`)) return;
+      try {
+        const res = await apiFetch("/api/fleet/batch-push", { json: { deviceIds: ids, releaseId } });
+        const okCnt = (res.results || []).filter((x) => x.ok).length;
+        toast(`批量推送已下发 ${okCnt}/${ids.length} 台`, "ok");
+        STATE.selectedDevices.clear();
+        await refreshAll(true);
+      } catch (err) {
+        toast(err.message, "err");
+      }
+    });
+
+    // Unified Fleet Table Clicks
     $("devices-tbody").addEventListener("click", (e) => {
+      const cb = e.target.closest(".fleet-row-check");
+      if (cb) {
+        if (cb.checked) STATE.selectedDevices.add(cb.value);
+        else STATE.selectedDevices.delete(cb.value);
+        syncBatchBar();
+        return;
+      }
       const pushBtn = e.target.closest("[data-push-device]");
       if (pushBtn) {
         openPushDrawer({ deviceId: pushBtn.dataset.pushDevice });
+        return;
+      }
+      const opsBtn = e.target.closest("[data-jump-ops-port]");
+      if (opsBtn) {
+        jumpToOpsTunnel(Number(opsBtn.dataset.jumpOpsPort));
+        return;
+      }
+      const detBtn = e.target.closest("[data-detail-device]");
+      if (detBtn) {
+        openDeviceDetailDrawer(detBtn.dataset.detailDevice);
         return;
       }
       const editBtn = e.target.closest("[data-edit-device]");
@@ -1260,6 +1779,134 @@
         const fleet = mergeFleetDevices(STATE.overview);
         const found = fleet.find((d) => d.deviceId === editBtn.dataset.editDevice);
         if (found) openDeviceDrawer(found);
+        return;
+      }
+      const row = e.target.closest("tr[data-row-device]");
+      if (row && !e.target.closest("button, input")) {
+        openDeviceDetailDrawer(row.dataset.rowDevice);
+      }
+    });
+
+    // Device 360° Detail Drawer Actions
+    $("btn-det-push").addEventListener("click", () => {
+      if (!STATE.detailDeviceId) return;
+      closeDrawer("drawer-device-detail");
+      openPushDrawer({ deviceId: STATE.detailDeviceId });
+    });
+    $("btn-det-edit").addEventListener("click", () => {
+      if (!STATE.detailDeviceId) return;
+      const found = mergeFleetDevices(STATE.overview).find((d) => d.deviceId === STATE.detailDeviceId);
+      closeDrawer("drawer-device-detail");
+      if (found) openDeviceDrawer(found);
+    });
+    $("btn-det-ops").addEventListener("click", () => {
+      const found = mergeFleetDevices(STATE.overview).find((d) => d.deviceId === STATE.detailDeviceId);
+      if (!found?.tunnelPort) return;
+      closeDrawer("drawer-device-detail");
+      jumpToOpsTunnel(found.tunnelPort);
+    });
+    $("btn-det-errlogs").addEventListener("click", async () => {
+      const found = mergeFleetDevices(STATE.overview).find((d) => d.deviceId === STATE.detailDeviceId);
+      if (!found?.tunnelPort) return;
+      const sec = $("det-errlogs-section");
+      const box = $("det-errlogs-output");
+      sec.classList.remove("hidden");
+      box.textContent = "正在拉取近 2 小时警告与错误日志…";
+      try {
+        const res = await apiFetch("/api/ops/error-logs", {
+          json: { target: { mode: "tunnel", port: found.tunnelPort }, hours: 2, lines: 80 },
+        });
+        $("det-errlogs-meta").textContent = `近 ${res.hours} 小时 · ${res.count} 条`;
+        box.textContent = res.text;
+      } catch (err) {
+        box.textContent = err.message;
+        toast(err.message, "err");
+      }
+    });
+    $("btn-det-save-owner").addEventListener("click", async () => {
+      if (!STATE.detailDeviceId) return;
+      const email = $("det-owner-input").value.trim();
+      try {
+        await apiFetch("/api/devices/owner", { json: { deviceId: STATE.detailDeviceId, ownerEmail: email } });
+        toast(email ? `设备归属已更新为 ${email}` : "已解除设备归属", "ok");
+        STATE.accountsLoaded = false;
+        await refreshAll(true);
+      } catch (err) {
+        toast(err.message, "err");
+      }
+    });
+    $("det-jobs-list").addEventListener("click", async (e) => {
+      const btn = e.target.closest("[data-cancel-job]");
+      if (!btn) return;
+      btn.disabled = true;
+      try {
+        await apiFetch(
+          `/api/jobs/${encodeURIComponent(btn.dataset.cancelDev)}/${encodeURIComponent(btn.dataset.cancelJob)}/cancel`,
+          { method: "POST", json: {} }
+        );
+        toast("已取消任务", "ok");
+        await refreshAll(true);
+      } catch (err) {
+        toast(err.message, "err");
+        btn.disabled = false;
+      }
+    });
+
+    // Persisted Jobs History View Events
+    document.querySelectorAll("#jobs-filter-chips .filter-pill").forEach((b) => {
+      b.addEventListener("click", () => {
+        STATE.jobsFilter = b.dataset.jobsFilter;
+        document.querySelectorAll("#jobs-filter-chips .filter-pill").forEach((p) => {
+          p.classList.toggle("active", p.dataset.jobsFilter === STATE.jobsFilter);
+        });
+        renderJobsHistory(STATE.overview);
+      });
+    });
+    $("jobs-search").addEventListener("input", () => renderJobsHistory(STATE.overview));
+    $("jobs-history-tbody").addEventListener("click", async (e) => {
+      const cancelBtn = e.target.closest("[data-cancel-job]");
+      if (cancelBtn) {
+        cancelBtn.disabled = true;
+        try {
+          await apiFetch(
+            `/api/jobs/${encodeURIComponent(cancelBtn.dataset.cancelDev)}/${encodeURIComponent(cancelBtn.dataset.cancelJob)}/cancel`,
+            { method: "POST", json: {} }
+          );
+          toast("已取消任务", "ok");
+          await refreshAll(true);
+        } catch (err) {
+          toast(err.message, "err");
+          cancelBtn.disabled = false;
+        }
+        return;
+      }
+      const retryBtn = e.target.closest("[data-retry-dev]");
+      if (retryBtn) {
+        openPushDrawer({ deviceId: retryBtn.dataset.retryDev, releaseId: retryBtn.dataset.retryRel });
+        return;
+      }
+      const detBtn = e.target.closest("[data-detail-device]");
+      if (detBtn) openDeviceDetailDrawer(detBtn.dataset.detailDevice);
+    });
+
+    // Accounts RBAC View Events
+    $("btn-reload-accounts").addEventListener("click", () => loadAccounts(false));
+    $("accounts-tbody").addEventListener("click", async (e) => {
+      const btn = e.target.closest("[data-save-role]");
+      if (!btn) return;
+      const uid = btn.dataset.saveRole;
+      const email = btn.dataset.saveEmail || uid;
+      const sel = document.querySelector(`[data-role-select="${CSS.escape(uid)}"]`);
+      const role = sel ? sel.value : "user";
+      if (!window.confirm(`确认将账号 ${email} 的角色设为 ${role}？`)) return;
+      btn.disabled = true;
+      try {
+        await apiFetch("/api/accounts/role", { json: { userId: uid, appRole: role } });
+        toast(`${email} 角色已更新为 ${role}`, "ok");
+        await loadAccounts(true);
+      } catch (err) {
+        toast(err.message, "err");
+        btn.disabled = false;
       }
     });
 
