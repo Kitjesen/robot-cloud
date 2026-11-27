@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 import mimetypes
@@ -564,24 +565,30 @@ class ConsoleContext:
             res["error"] = "未配置访问令牌"
             return res
 
-        try:
-            st_dev, _ = raw_http_json(base_url, "GET", "/v1/devices/status", token=token, timeout_s=10)
-            if st_dev == 200:
-                res["authOk"] = True
-            elif st_dev == 401:
-                res["error"] = "访问令牌无效"
-                return res
-            else:
-                res["error"] = f"设备接口返回 HTTP {st_dev}"
-        except ops.OpsError as exc:
-            res["error"] = str(exc)
-            return res
+        def _probe(path: str) -> tuple[int | None, str | None]:
+            try:
+                st_p, _ = raw_http_json(base_url, "GET", path, token=token, timeout_s=10)
+                return st_p, None
+            except ops.OpsError as exc:
+                return None, str(exc)
 
-        try:
-            st_rel, _ = raw_http_json(base_url, "GET", "/v1/releases", token=token, timeout_s=10)
-            res["releasesApiReady"] = st_rel == 200
-        except ops.OpsError:
-            res["releasesApiReady"] = False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_dev = pool.submit(_probe, "/v1/devices/status")
+            f_rel = pool.submit(_probe, "/v1/releases")
+            st_dev, err_dev = f_dev.result()
+            st_rel, _ = f_rel.result()
+
+        if err_dev:
+            res["error"] = err_dev
+            return res
+        if st_dev == 200:
+            res["authOk"] = True
+        elif st_dev == 401:
+            res["error"] = "访问令牌无效"
+            return res
+        else:
+            res["error"] = f"设备接口返回 HTTP {st_dev}"
+        res["releasesApiReady"] = st_rel == 200
         return res
 
     def get_overview(self) -> dict[str, Any]:
@@ -596,87 +603,112 @@ class ConsoleContext:
             "devices": [],
             "releases": [],
             "rollouts": [],
-            "android": {},
+            "android": {ch: None for ch in ANDROID_CHANNELS},
             "trackedJobs": [],
             "warnings": [],
         }
 
-        try:
-            st_h, _ = raw_http_json(base_url, "GET", "/health", timeout_s=8)
-            out["cloudReachable"] = st_h == 200
-        except ops.OpsError as exc:
-            out["warnings"].append(str(exc))
-            return out
-
-        for ch in ANDROID_CHANNELS:
+        def _safe_get(path: str, use_token: bool = False, timeout_s: int = 12) -> tuple[int | None, Any, str | None]:
             try:
-                st_a, body_a = raw_http_json(
+                st, body = raw_http_json(
                     base_url,
                     "GET",
+                    path,
+                    token=token if use_token else None,
+                    timeout_s=timeout_s,
+                )
+                return st, body, None
+            except ops.OpsError as exc:
+                return None, None, str(exc)
+
+        tracked_list = self.jobs.list_items()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            f_health = pool.submit(_safe_get, "/health", False, 8)
+            f_android = {
+                ch: pool.submit(
+                    _safe_get,
                     f"/v1/apps/android/latest?channel={urllib.parse.quote(ch)}&version_code=0",
-                    timeout_s=8,
+                    False,
+                    8,
                 )
+                for ch in ANDROID_CHANNELS
+            }
+            f_dev = pool.submit(_safe_get, "/v1/devices/status", True, 12) if token else None
+            f_rel = pool.submit(_safe_get, "/v1/releases", True, 12) if token else None
+            f_ro = pool.submit(_safe_get, "/v1/rollouts", True, 12) if token else None
+            f_jobs = [
+                (
+                    tracked,
+                    pool.submit(
+                        _safe_get,
+                        f"/v1/devices/{urllib.parse.quote(str(tracked['deviceId']))}/firmware/jobs/{urllib.parse.quote(str(tracked['jobId']))}",
+                        True,
+                        8,
+                    ),
+                )
+                for tracked in tracked_list
+                if token and tracked.get("deviceId") and tracked.get("jobId")
+            ]
+
+            st_h, _, err_h = f_health.result()
+            out["cloudReachable"] = st_h == 200
+            if err_h:
+                out["warnings"].append(err_h)
+                return out
+
+            for ch, fut in f_android.items():
+                st_a, body_a, _ = fut.result()
                 out["android"][ch] = body_a if st_a == 200 else None
-            except ops.OpsError:
-                out["android"][ch] = None
 
-        if not token:
-            return out
+            if not token:
+                return out
 
-        st_d, body_d = raw_http_json(base_url, "GET", "/v1/devices/status", token=token, timeout_s=12)
-        if st_d == 200 and isinstance(body_d, list):
-            out["authOk"] = True
-            out["devices"] = body_d
-        elif st_d == 401:
-            out["warnings"].append("访问令牌无效")
-            return out
-        else:
-            out["warnings"].append(f"读取设备状态失败 (HTTP {st_d})")
+            st_d, body_d, err_d = f_dev.result()  # type: ignore[union-attr]
+            if err_d:
+                out["warnings"].append(err_d)
+            elif st_d == 200 and isinstance(body_d, list):
+                out["authOk"] = True
+                out["devices"] = body_d
+            elif st_d == 401:
+                out["warnings"].append("访问令牌无效")
+                return out
+            else:
+                out["warnings"].append(f"读取设备状态失败 (HTTP {st_d})")
 
-        st_r, body_r = raw_http_json(base_url, "GET", "/v1/releases", token=token, timeout_s=12)
-        if st_r == 200 and isinstance(body_r, list):
-            out["releasesApiReady"] = True
-            out["releases"] = body_r
-        elif st_r == 404:
-            out["releasesApiReady"] = False
-            # Fallback: fetch compatible releases from the first reported device if available
-            if out["devices"]:
-                first_dev = out["devices"][0].get("deviceId")
-                if first_dev:
-                    st_dr, body_dr = raw_http_json(
-                        base_url,
-                        "GET",
-                        f"/v1/devices/{urllib.parse.quote(str(first_dev))}/firmware/releases",
-                        token=token,
-                        timeout_s=10,
-                    )
-                    if st_dr == 200 and isinstance(body_dr, list):
-                        out["releases"] = body_dr
-        else:
-            out["warnings"].append(f"读取版本库失败 (HTTP {st_r})")
+            st_r, body_r, err_r = f_rel.result()  # type: ignore[union-attr]
+            if err_r:
+                out["warnings"].append(err_r)
+            elif st_r == 200 and isinstance(body_r, list):
+                out["releasesApiReady"] = True
+                out["releases"] = body_r
+            elif st_r == 404:
+                out["releasesApiReady"] = False
+                if out["devices"]:
+                    first_dev = out["devices"][0].get("deviceId")
+                    if first_dev:
+                        st_dr, body_dr, _ = _safe_get(
+                            f"/v1/devices/{urllib.parse.quote(str(first_dev))}/firmware/releases",
+                            True,
+                            10,
+                        )
+                        if st_dr == 200 and isinstance(body_dr, list):
+                            out["releases"] = body_dr
+            else:
+                out["warnings"].append(f"读取版本库失败 (HTTP {st_r})")
 
-        st_ro, body_ro = raw_http_json(base_url, "GET", "/v1/rollouts", token=token, timeout_s=12)
-        if st_ro == 200 and isinstance(body_ro, list):
-            out["rollouts"] = body_ro
+            st_ro, body_ro, _ = f_ro.result()  # type: ignore[union-attr]
+            if st_ro == 200 and isinstance(body_ro, list):
+                out["rollouts"] = body_ro
 
-        refreshed_jobs: list[dict[str, Any]] = []
-        for tracked in self.jobs.list_items():
-            dev_id = tracked.get("deviceId")
-            job_id = tracked.get("jobId")
-            if dev_id and job_id:
-                st_j, body_j = raw_http_json(
-                    base_url,
-                    "GET",
-                    f"/v1/devices/{urllib.parse.quote(str(dev_id))}/firmware/jobs/{urllib.parse.quote(str(job_id))}",
-                    token=token,
-                    timeout_s=8,
-                )
+            refreshed_jobs: list[dict[str, Any]] = []
+            for tracked, fut in f_jobs:
+                st_j, body_j, _ = fut.result()
                 if st_j == 200 and isinstance(body_j, dict):
                     self.jobs.record(body_j)
                     refreshed_jobs.append(body_j)
-                    continue
-            refreshed_jobs.append(tracked)
-        out["trackedJobs"] = refreshed_jobs
+                else:
+                    refreshed_jobs.append(tracked)
+            out["trackedJobs"] = refreshed_jobs
         return out
 
     def publish_robot_release(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1036,20 +1068,26 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
 
         def _send_json(self, status: int, data: Any) -> None:
             raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self._send_security_headers()
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
+            try:
+                self.send_response(status)
+                self._send_security_headers()
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
 
         def _send_bytes(self, status: int, content_type: str, data: bytes) -> None:
-            self.send_response(status)
-            self._send_security_headers()
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(status)
+                self._send_security_headers()
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
 
         def _check_local_guard(self, is_mutation: bool) -> bool:
             if ctx.allow_remote:
