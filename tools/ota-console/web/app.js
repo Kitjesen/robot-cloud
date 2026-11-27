@@ -36,6 +36,8 @@
     ossLocalPath: "",
     ossSelectedName: "",
     ossKeyTouched: false,
+    ghReleases: [],
+    ghRepoLoaded: "",
   };
 
   const VIEW_META = {
@@ -175,6 +177,7 @@
       return;
     }
     const STEP_LABELS = {
+      download: "拉取产物",
       package: "打包校验",
       upload: "上传存储",
       register: "云端登记",
@@ -1020,6 +1023,17 @@
     $("cfg-ecs-instance").value = cfg.ecsInstanceId || "";
     $("cfg-ecsak-status").textContent = cfg.ecsAkIdConfigured ? `已配置 ${cfg.ecsAkIdPreview}` : "未配置";
     $("cfg-ecssec-status").textContent = cfg.ecsAkSecretConfigured ? "已配置" : "未配置";
+    if ($("cfg-gh-repo")) $("cfg-gh-repo").value = cfg.githubRepo || "Kitjesen/brainstem";
+    if ($("cfg-gh-status")) {
+      $("cfg-gh-status").textContent = cfg.githubTokenConfigured
+        ? `已配置 ${cfg.githubTokenPreview}`
+        : cfg.githubAuthSource === "gh_cli"
+        ? "已就绪 (本机 gh)"
+        : "未配置";
+    }
+    if ($("pub-gh-repo") && !$("pub-gh-repo").value) {
+      $("pub-gh-repo").value = cfg.githubRepo || "Kitjesen/brainstem";
+    }
   }
 
   function renderLocalArtifactChips() {
@@ -1310,6 +1324,76 @@
     $("pane-local-dir").classList.toggle("hidden", mode !== "local_dir");
     $("pane-upload").classList.toggle("hidden", mode !== "upload");
     $("pane-local-file").classList.toggle("hidden", mode !== "local_file");
+    $("pane-github").classList.toggle("hidden", mode !== "github");
+    if (mode === "github" && !STATE.ghReleases.length) {
+      loadGithubReleases(true);
+    }
+  }
+
+  function applySelectedGithubRelease() {
+    const tag = $("pub-gh-release").value;
+    const rel = STATE.ghReleases.find((r) => r.tagName === tag);
+    const assetSel = $("pub-gh-asset");
+    const meta = $("pub-gh-meta");
+    if (!rel) {
+      assetSel.innerHTML = `<option value="">暂无可用产物</option>`;
+      meta.textContent = "未找到可导入的 Release 资产";
+      return;
+    }
+    assetSel.innerHTML = rel.assets
+      .map(
+        (a) =>
+          `<option value="${esc(a.id)}" data-name="${esc(a.name)}" data-sha="${esc(a.sha256 || "")}">${esc(
+            a.name
+          )} (${formatBytes(a.sizeBytes)})</option>`
+      )
+      .join("");
+    const first = rel.assets[0];
+    $("pub-type").value = "brainstem_release";
+    syncPubTypeFields();
+    if (rel.version) $("pub-version").value = rel.version;
+    if (rel.suggestedChannel) $("pub-channel").value = rel.suggestedChannel;
+    STATE.pubReleaseIdTouched = false;
+    updateAutoReleaseId();
+    const publishedText = rel.publishedAt ? formatTime(Date.parse(rel.publishedAt)) : "";
+    meta.textContent = `${rel.tagName} · ${publishedText}${first?.sha256 ? ` · SHA-256 ${first.sha256.slice(0, 12)}` : ""}`;
+  }
+
+  async function loadGithubReleases(silent = false) {
+    const repoInput = $("pub-gh-repo");
+    const repo = (repoInput.value || STATE.overview?.config?.githubRepo || "Kitjesen/brainstem").trim();
+    repoInput.value = repo;
+    const btn = $("btn-pub-gh-refresh");
+    const meta = $("pub-gh-meta");
+    btn.disabled = true;
+    meta.textContent = `正在从 ${repo} 读取 Release 列表…`;
+    try {
+      const data = await apiFetch(`/api/github/releases?repo=${encodeURIComponent(repo)}`);
+      STATE.ghReleases = data.releases || [];
+      STATE.ghRepoLoaded = data.repo || repo;
+      const relSel = $("pub-gh-release");
+      if (!STATE.ghReleases.length) {
+        relSel.innerHTML = `<option value="">暂无 Release</option>`;
+        $("pub-gh-asset").innerHTML = `<option value="">—</option>`;
+        meta.textContent = `${STATE.ghRepoLoaded} 暂无可导入的压缩包`;
+        return;
+      }
+      relSel.innerHTML = STATE.ghReleases
+        .map(
+          (r, idx) =>
+            `<option value="${esc(r.tagName)}">${esc(r.tagName)}${idx === 0 ? " (最新)" : ""} · ${esc(
+              r.name
+            )}</option>`
+        )
+        .join("");
+      applySelectedGithubRelease();
+      if (!silent) toast(`已加载 ${STATE.ghReleases.length} 个 GitHub Release`, "ok");
+    } catch (err) {
+      meta.textContent = err.message;
+      if (!silent) toast(err.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   async function inspectAndShowPath(pathStr, metaEl) {
@@ -1355,6 +1439,8 @@
   }
 
   async function submitRobotPublish(dryRun) {
+    const ghAssetSel = $("pub-gh-asset");
+    const ghOpt = ghAssetSel?.selectedOptions?.[0];
     const payload = {
       artifactType: $("pub-type").value,
       channel: $("pub-channel").value,
@@ -1364,6 +1450,10 @@
       sourceMode: STATE.pubSourceMode,
       localPath: STATE.pubSourceMode === "local_dir" ? $("pub-dir-path").value.trim() : $("pub-file-path").value.trim(),
       uploadId: STATE.pubUpload?.uploadId || "",
+      githubRepo: $("pub-gh-repo")?.value.trim() || "",
+      githubAssetId: Number(ghAssetSel?.value || 0),
+      githubAssetName: ghOpt?.dataset?.name || "",
+      githubAssetSha256: ghOpt?.dataset?.sha || "",
       policySlot: $("pub-policy-slot").value.trim(),
       component: $("pub-component").value.trim(),
       dispatchMode: $("pub-dispatch-mode").value,
@@ -1826,6 +1916,20 @@
     });
     $("btn-open-provision").addEventListener("click", () => openProvisionDrawer());
     $("btn-open-bundle").addEventListener("click", () => openBundleDrawer());
+    $("btn-open-github-import")?.addEventListener("click", () => {
+      suggestNextReleaseMeta();
+      $("robot-publish-result").classList.add("hidden");
+      setPubSourceMode("github");
+      openDrawer("drawer-publish");
+    });
+    $("btn-pub-gh-refresh")?.addEventListener("click", () => loadGithubReleases(false));
+    $("pub-gh-release")?.addEventListener("change", () => applySelectedGithubRelease());
+    $("pub-gh-asset")?.addEventListener("change", () => {
+      const opt = $("pub-gh-asset").selectedOptions?.[0];
+      const tag = $("pub-gh-release").value;
+      const sha = opt?.dataset?.sha || "";
+      $("pub-gh-meta").textContent = `${tag} · ${opt?.dataset?.name || ""}${sha ? ` · SHA-256 ${sha.slice(0, 12)}` : ""}`;
+    });
 
     // One-Click Provision Drawer Events
     let lastProvisionResult = null;
@@ -2925,6 +3029,8 @@
             ecsInstanceId: $("cfg-ecs-instance").value.trim(),
             ecsAccessKeyId: $("cfg-ecs-ak-id").value.trim() || undefined,
             ecsAccessKeySecret: $("cfg-ecs-ak-secret").value.trim() || undefined,
+            githubRepo: $("cfg-gh-repo")?.value.trim() || undefined,
+            githubToken: $("cfg-gh-token")?.value.trim() || undefined,
           },
         });
         $("cfg-api-token").value = "";
@@ -2933,6 +3039,7 @@
         $("cfg-ops-robot-pwd").value = "";
         $("cfg-ecs-ak-id").value = "";
         $("cfg-ecs-ak-secret").value = "";
+        if ($("cfg-gh-token")) $("cfg-gh-token").value = "";
         populateSettingsForm(updated);
         toast("配置已保存", "ok");
         await refreshAll(true);

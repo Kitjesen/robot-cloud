@@ -15,11 +15,13 @@ from email.utils import formatdate
 import hashlib
 import hmac
 import http.client
+import json
 import mimetypes
 from pathlib import Path
 import re
 import shlex
 import socket
+import subprocess
 import time
 from typing import Any
 import urllib.error
@@ -56,6 +58,9 @@ _DOCKER_MAP = {item["name"]: item for item in CLOUD_DOCKER_CONTAINERS}
 DEFAULT_MQTT_HOST = "8.153.169.177"
 DEFAULT_MQTT_PORT = 8883
 DEFAULT_EDGE_URL = "https://api-test.dosorobotics.com/functions/v1/firmware-ota"
+DEFAULT_GITHUB_REPO = "Kitjesen/brainstem"
+GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+_GH_CLI_CACHE: tuple[float, str] | None = None
 
 
 def _local_tag(tag: str) -> str:
@@ -738,3 +743,208 @@ def get_cloud_service_logs(
         }
     finally:
         jump.close()
+
+
+# ---------- GitHub Release Import Helpers (Plan B) ----------
+
+
+class _NoAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Strip GitHub Bearer token when following cross-origin redirects to S3 asset URLs."""
+
+    def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            orig_host = (urllib.parse.urlparse(req.full_url).hostname or "").lower()
+            next_host = (urllib.parse.urlparse(newurl).hostname or "").lower()
+            if orig_host != next_host:
+                for hdr in ("Authorization", "authorization"):
+                    redirected.headers.pop(hdr, None)
+                    redirected.unredirected_hdrs.pop(hdr, None)
+        return redirected
+
+
+def validate_github_repo(raw_repo: str) -> str:
+    cleaned = str(raw_repo or "").strip().strip("/")
+    if not cleaned:
+        cleaned = DEFAULT_GITHUB_REPO
+    if not GITHUB_REPO_RE.fullmatch(cleaned):
+        raise CloudOpsError(f"GitHub 仓库格式无效（应为 owner/repo）: {cleaned}")
+    return cleaned
+
+
+def resolve_github_token(cfg: dict[str, str]) -> tuple[str, str]:
+    """Return (source, token): 'config' | 'env' | 'gh_cli' | 'none'."""
+    global _GH_CLI_CACHE
+    tok = (cfg.get("DOSO_GITHUB_TOKEN") or "").strip()
+    if tok:
+        return "config", tok
+    env_tok = (cfg.get("GITHUB_TOKEN") or "").strip()
+    if env_tok:
+        return "env", env_tok
+    now = time.monotonic()
+    if _GH_CLI_CACHE is not None and (now - _GH_CLI_CACHE[0]) < 120.0:
+        return ("gh_cli", _GH_CLI_CACHE[1]) if _GH_CLI_CACHE[1] else ("none", "")
+    try:
+        proc = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        cli_tok = proc.stdout.strip() if proc.returncode == 0 else ""
+    except Exception:
+        cli_tok = ""
+    _GH_CLI_CACHE = (now, cli_tok)
+    return ("gh_cli", cli_tok) if cli_tok else ("none", "")
+
+
+def _infer_release_channel(tag: str, prerelease: bool) -> str:
+    low = (tag or "").lower()
+    if "-dev" in low:
+        return "dev"
+    if prerelease or any(tok in low for tok in ("-qa", "-rc", "-beta", "-alpha", "-pre")):
+        return "qa"
+    return "stable"
+
+
+def _asset_sort_key(name: str) -> tuple[int, str]:
+    low = name.lower()
+    if low.startswith("doso-brainstem-") and low.endswith(".tar.gz"):
+        return (0, low)
+    if low.endswith(".tar.gz") or low.endswith(".tgz"):
+        return (1, low)
+    if low.endswith(".apk"):
+        return (2, low)
+    return (3, low)
+
+
+def list_github_releases(cfg: dict[str, str], repo: str = "", limit: int = 15) -> dict[str, Any]:
+    repo_clean = validate_github_repo(repo or cfg.get("DOSO_GITHUB_REPO") or DEFAULT_GITHUB_REPO)
+    auth_source, token = resolve_github_token(cfg)
+    per_page = max(1, min(30, int(limit or 15)))
+    url = f"https://api.github.com/repos/{repo_clean}/releases?per_page={per_page}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "doso-ota-console/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read()
+            payload = json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        if err.code == 404:
+            raise CloudOpsError(f"未找到仓库 {repo_clean} 或无访问权限，请在「系统配置」填入 GitHub 令牌") from err
+        if err.code in (401, 403):
+            raise CloudOpsError("GitHub 鉴权失败或频率受限，请在「系统配置」检查 GitHub 令牌") from err
+        raise CloudOpsError(f"读取 GitHub Release 失败 (HTTP {err.code})") from err
+    except Exception as exc:
+        raise CloudOpsError(f"连接 GitHub 失败: {exc}") from exc
+
+    releases: list[dict[str, Any]] = []
+    for item in payload if isinstance(payload, list) else []:
+        if not isinstance(item, dict) or item.get("draft"):
+            continue
+        tag = str(item.get("tag_name") or "").strip()
+        if not tag:
+            continue
+        prerelease = bool(item.get("prerelease", False))
+        assets: list[dict[str, Any]] = []
+        for a in item.get("assets") or []:
+            if not isinstance(a, dict):
+                continue
+            aname = str(a.get("name") or "").strip()
+            if not aname.lower().endswith((".tar.gz", ".tgz", ".apk")):
+                continue
+            raw_digest = str(a.get("digest") or "").strip()
+            sha = raw_digest.split(":", 1)[1].lower() if raw_digest.lower().startswith("sha256:") else ""
+            assets.append(
+                {
+                    "id": int(a.get("id") or 0),
+                    "name": aname,
+                    "sizeBytes": int(a.get("size") or 0),
+                    "sha256": sha,
+                    "contentType": str(a.get("content_type") or ""),
+                    "updatedAt": str(a.get("updated_at") or ""),
+                }
+            )
+        assets.sort(key=lambda x: _asset_sort_key(x["name"]))
+        if not assets:
+            continue
+        releases.append(
+            {
+                "id": int(item.get("id") or 0),
+                "tagName": tag,
+                "version": tag.lstrip("vV"),
+                "name": str(item.get("name") or tag),
+                "prerelease": prerelease,
+                "suggestedChannel": _infer_release_channel(tag, prerelease),
+                "publishedAt": str(item.get("published_at") or item.get("created_at") or ""),
+                "htmlUrl": str(item.get("html_url") or ""),
+                "assets": assets,
+            }
+        )
+
+    return {
+        "repo": repo_clean,
+        "authSource": auth_source,
+        "releases": releases,
+    }
+
+
+def download_github_release_asset(
+    cfg: dict[str, str],
+    repo: str,
+    asset_id: int,
+    dest_path: Path,
+    *,
+    expected_sha256: str = "",
+    timeout_s: int = 120,
+) -> dict[str, Any]:
+    repo_clean = validate_github_repo(repo or cfg.get("DOSO_GITHUB_REPO") or DEFAULT_GITHUB_REPO)
+    aid = int(asset_id or 0)
+    if aid <= 0:
+        raise CloudOpsError("无效的 GitHub 资产 ID")
+    _, token = resolve_github_token(cfg)
+    url = f"https://api.github.com/repos/{repo_clean}/releases/assets/{aid}"
+    headers = {
+        "Accept": "application/octet-stream",
+        "User-Agent": "doso-ota-console/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    opener = urllib.request.build_opener(_NoAuthRedirectHandler())
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    digest = hashlib.sha256()
+    total = 0
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with opener.open(req, timeout=timeout_s) as resp, dest_path.open("wb") as fh:
+            while chunk := resp.read(65536):
+                fh.write(chunk)
+                digest.update(chunk)
+                total += len(chunk)
+    except urllib.error.HTTPError as err:
+        dest_path.unlink(missing_ok=True)
+        raise CloudOpsError(f"下载 GitHub 固件包失败 (HTTP {err.code})") from err
+    except Exception as exc:
+        dest_path.unlink(missing_ok=True)
+        raise CloudOpsError(f"下载 GitHub 固件包失败: {exc}") from exc
+
+    if total <= 0:
+        dest_path.unlink(missing_ok=True)
+        raise CloudOpsError("下载的 GitHub 固件包为空")
+
+    actual_sha = digest.hexdigest()
+    exp = (expected_sha256 or "").strip().lower()
+    if exp and actual_sha != exp:
+        dest_path.unlink(missing_ok=True)
+        raise CloudOpsError(f"GitHub 资产校验不一致: 预期 {exp[:12]}，实际 {actual_sha[:12]}")
+
+    return {"path": str(dest_path), "sizeBytes": total, "sha256": actual_sha}

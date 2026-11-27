@@ -237,6 +237,7 @@
               <h2>云端版本库</h2>
               <div class="section-actions">
                 <input class="search-input" id="release-search" type="search" placeholder="搜索版本编号或类型" />
+                <button class="btn btn-ghost btn-sm" id="btn-open-github-import" type="button">GitHub 导入</button>
                 <button class="btn btn-ghost btn-sm" id="btn-open-bundle" type="button">合成整机包</button>
               </div>
             </div>
@@ -781,6 +782,18 @@
                 </div>
               </div>
 
+              <div class="section-subhead">GitHub 同步</div>
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="cfg-gh-repo">固件仓库</label>
+                  <input id="cfg-gh-repo" type="text" placeholder="Kitjesen/brainstem" />
+                </div>
+                <div class="field">
+                  <label for="cfg-gh-token">访问令牌 <span class="field-status" id="cfg-gh-status"></span></label>
+                  <input id="cfg-gh-token" type="password" autocomplete="off" placeholder="选填，留空自动复用本机 gh" />
+                </div>
+              </div>
+
               <div class="form-actions">
                 <button class="btn btn-primary" type="submit">保存配置</button>
               </div>
@@ -833,9 +846,22 @@
         <div class="field">
           <label>构建产物</label>
           <div class="segmented" id="pub-source-tabs">
-            <button type="button" class="seg-btn active" data-source="local_dir">本地目录打包</button>
-            <button type="button" class="seg-btn" data-source="upload">上传压缩包</button>
+            <button type="button" class="seg-btn active" data-source="local_dir">本地目录</button>
+            <button type="button" class="seg-btn" data-source="upload">上传包</button>
             <button type="button" class="seg-btn" data-source="local_file">本地文件</button>
+            <button type="button" class="seg-btn" data-source="github">GitHub 导入</button>
+          </div>
+
+          <div class="source-pane hidden" id="pane-github">
+            <div class="input-with-btn" style="margin-bottom:8px;">
+              <input id="pub-gh-repo" type="text" class="mono" placeholder="Kitjesen/brainstem" />
+              <button class="btn btn-ghost btn-sm" id="btn-pub-gh-refresh" type="button">拉取列表</button>
+            </div>
+            <div class="form-grid-2" style="gap:8px;">
+              <select id="pub-gh-release"></select>
+              <select id="pub-gh-asset"></select>
+            </div>
+            <div class="dropzone-meta" id="pub-gh-meta">点击「拉取列表」加载 GitHub Release</div>
           </div>
 
           <div class="source-pane" id="pane-local-dir">

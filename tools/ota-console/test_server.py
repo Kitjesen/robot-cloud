@@ -927,6 +927,73 @@ class OtaConsoleTests(unittest.TestCase):
             self.assertEqual(st_del_ok, 200)
             self.assertTrue(del_ok["deleted"])
 
+        # GitHub Release import (Plan B) validation, listing route & publish pipeline
+        self.assertEqual(co.validate_github_repo("Kitjesen/brainstem"), "Kitjesen/brainstem")
+        with self.assertRaises(co.CloudOpsError):
+            co.validate_github_repo("bad repo/../../x")
+
+        mock_gh_list = {
+            "repo": "Kitjesen/brainstem",
+            "authSource": "config",
+            "releases": [
+                {
+                    "id": 1,
+                    "tagName": "v0.0.5",
+                    "version": "0.0.5",
+                    "name": "DOSO Brainstem v0.0.5",
+                    "prerelease": False,
+                    "suggestedChannel": "stable",
+                    "publishedAt": "2026-11-27T19:42:59Z",
+                    "htmlUrl": "https://github.com/Kitjesen/brainstem/releases/tag/v0.0.5",
+                    "assets": [
+                        {
+                            "id": 801816213,
+                            "name": "doso-brainstem-v0.0.5-linux-arm64.tar.gz",
+                            "sizeBytes": 4938587,
+                            "sha256": "a" * 64,
+                        }
+                    ],
+                }
+            ],
+        }
+        with mock.patch.object(co, "list_github_releases", return_value=mock_gh_list):
+            st_gh, gh_data = self._req("GET", "/api/github/releases?repo=Kitjesen/brainstem")
+            self.assertEqual(st_gh, 200)
+            self.assertEqual(gh_data["releases"][0]["tagName"], "v0.0.5")
+
+        def _fake_gh_dl(cfg: Any, repo: str, asset_id: int, dest: Path, expected_sha256: str = "") -> dict[str, Any]:
+            content = b"fake-tar-gz-payload-from-github"
+            dest.write_bytes(content)
+            return {"path": str(dest), "sizeBytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+
+        with (
+            mock.patch.object(co, "download_github_release_asset", side_effect=_fake_gh_dl),
+            mock.patch.object(
+                console.ops,
+                "upload_to_oss",
+                return_value={"objectKey": "firmware/stable/brainstem-0.0.5-stable-s205/brainstem.tar.gz", "uploaded": True},
+            ),
+        ):
+            st_pub_gh, pub_gh = self._req(
+                "POST",
+                "/api/releases/publish",
+                body={
+                    "artifactType": "brainstem_release",
+                    "channel": "stable",
+                    "version": "0.0.5",
+                    "sequence": 205,
+                    "releaseId": "brainstem-0.0.5-stable-s205",
+                    "sourceMode": "github",
+                    "githubRepo": "Kitjesen/brainstem",
+                    "githubAssetId": 801816213,
+                    "githubAssetName": "doso-brainstem-v0.0.5-linux-arm64.tar.gz",
+                    "dispatchMode": "none",
+                },
+            )
+            self.assertEqual(st_pub_gh, 200)
+            self.assertEqual(pub_gh["releaseId"], "brainstem-0.0.5-stable-s205")
+            self.assertEqual(pub_gh["steps"][0]["step"], "download")
+
 
 if __name__ == "__main__":
     unittest.main()

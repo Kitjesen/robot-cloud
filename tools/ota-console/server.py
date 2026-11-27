@@ -77,6 +77,8 @@ CONFIG_KEYS = (
     "DOSO_ECS_ACCESS_KEY_ID",
     "DOSO_ECS_ACCESS_KEY_SECRET",
     "DOSO_DEFAULT_OWNER_EMAIL",
+    "DOSO_GITHUB_REPO",
+    "DOSO_GITHUB_TOKEN",
 )
 SECRET_CONFIG_KEYS = frozenset(
     {
@@ -86,6 +88,7 @@ SECRET_CONFIG_KEYS = frozenset(
         "DOSO_OPS_ROBOT_PASSWORD",
         "DOSO_ECS_ACCESS_KEY_ID",
         "DOSO_ECS_ACCESS_KEY_SECRET",
+        "DOSO_GITHUB_TOKEN",
     }
 )
 DEFAULT_CONFIG: dict[str, str] = {
@@ -110,6 +113,8 @@ DEFAULT_CONFIG: dict[str, str] = {
     "DOSO_ECS_ACCESS_KEY_ID": "",
     "DOSO_ECS_ACCESS_KEY_SECRET": "",
     "DOSO_DEFAULT_OWNER_EMAIL": "995632531@qq.com",
+    "DOSO_GITHUB_REPO": "Kitjesen/brainstem",
+    "DOSO_GITHUB_TOKEN": "",
 }
 
 
@@ -210,6 +215,8 @@ class ConfigStore:
         robot_pwd = cfg["DOSO_OPS_ROBOT_PASSWORD"]
         ecs_ak_id = cfg["DOSO_ECS_ACCESS_KEY_ID"]
         ecs_ak_sec = cfg["DOSO_ECS_ACCESS_KEY_SECRET"]
+        gh_token = cfg["DOSO_GITHUB_TOKEN"]
+        gh_auth_source, gh_resolved = cloud_ops.resolve_github_token(cfg)
         jump_key_auto = (Path.home() / ".ssh" / "inovxio_deploy").is_file()
         return {
             "cloudUrl": cfg["DOSO_OTA_CLOUD_URL"],
@@ -241,6 +248,11 @@ class ConfigStore:
             "ecsAkSecretConfigured": bool(ecs_ak_sec),
             "ecsAutoReady": bool(ecs_ak_id and ecs_ak_sec),
             "defaultOwnerEmail": cfg["DOSO_DEFAULT_OWNER_EMAIL"],
+            "githubRepo": cfg["DOSO_GITHUB_REPO"],
+            "githubTokenConfigured": bool(gh_token),
+            "githubTokenPreview": mask_secret(gh_token),
+            "githubAuthReady": bool(gh_resolved),
+            "githubAuthSource": gh_auth_source,
         }
 
     def update(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -262,6 +274,7 @@ class ConfigStore:
                 "ecsInstanceId": "DOSO_ECS_INSTANCE_ID",
                 "ecsRegion": "DOSO_ECS_REGION",
                 "defaultOwnerEmail": "DOSO_DEFAULT_OWNER_EMAIL",
+                "githubRepo": "DOSO_GITHUB_REPO",
             }
             for json_key, env_key in field_map.items():
                 if json_key in payload and payload[json_key] is not None:
@@ -280,6 +293,7 @@ class ConfigStore:
                 "opsRobotPassword": ("DOSO_OPS_ROBOT_PASSWORD", "clearOpsRobotPassword"),
                 "ecsAccessKeyId": ("DOSO_ECS_ACCESS_KEY_ID", "clearEcsCredentials"),
                 "ecsAccessKeySecret": ("DOSO_ECS_ACCESS_KEY_SECRET", "clearEcsCredentials"),
+                "githubToken": ("DOSO_GITHUB_TOKEN", "clearGithubToken"),
             }
             for json_key, (env_key, clear_flag) in secret_map.items():
                 if payload.get(clear_flag):
@@ -999,6 +1013,28 @@ class ConsoleContext:
                 else:
                     artifact_path = uploaded_path
                     steps.append({"step": "package", "status": "skipped", "detail": "使用已上传压缩包"})
+            elif source_mode == "github":
+                gh_repo = str(payload.get("githubRepo") or cfg["DOSO_GITHUB_REPO"]).strip()
+                gh_asset_id = int(payload.get("githubAssetId") or 0)
+                gh_asset_name = str(payload.get("githubAssetName") or f"{release_id}.tar.gz").strip()
+                gh_asset_sha = str(payload.get("githubAssetSha256") or "").strip()
+                safe_asset = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(gh_asset_name).name) or f"{release_id}.tar.gz"
+                dest_tar = Path(tmp_ctx.name) / safe_asset
+                dl_meta = cloud_ops.download_github_release_asset(
+                    cfg,
+                    gh_repo,
+                    gh_asset_id,
+                    dest_tar,
+                    expected_sha256=gh_asset_sha,
+                )
+                artifact_path = dest_tar
+                steps.append(
+                    {
+                        "step": "download",
+                        "status": "ok",
+                        "detail": f"GitHub 拉取 {safe_asset} ({dl_meta['sizeBytes']} B)",
+                    }
+                )
             else:
                 raise ops.OpsError(f"不支持的文件来源: {source_mode}")
 
@@ -1482,6 +1518,12 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     qs = urllib.parse.parse_qs(parsed.query)
                     prefix = qs.get("prefix", [""])[0]
                     self._send_json(HTTPStatus.OK, ctx.list_oss_objects(prefix))
+                    return
+                if path == "/api/github/releases":
+                    cfg = ctx.config_store.effective()
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    repo = qs.get("repo", [""])[0]
+                    self._send_json(HTTPStatus.OK, cloud_ops.list_github_releases(cfg, repo=repo))
                     return
 
                 m_dev_rel = re.fullmatch(r"/api/devices/([^/]+)/releases", path)
