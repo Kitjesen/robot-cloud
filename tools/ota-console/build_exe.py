@@ -13,6 +13,7 @@ CONSOLE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CONSOLE_DIR.parent.parent
 SERVER_PY = CONSOLE_DIR / "server.py"
 ROBOT_OPS_PY = CONSOLE_DIR / "robot_ops.py"
+PROVISION_OPS_PY = CONSOLE_DIR / "provision_ops.py"
 WEB_DIR = CONSOLE_DIR / "web"
 OPS_PY = REPO_ROOT / "tools" / "deploy" / "doso-ota-ops.py"
 DEFAULT_DIST = REPO_ROOT / "artifacts" / "ota-console"
@@ -78,6 +79,8 @@ def main() -> int:
             f"{OPS_PY}{sep}.",
             "--add-data",
             f"{ROBOT_OPS_PY}{sep}.",
+            "--add-data",
+            f"{PROVISION_OPS_PY}{sep}.",
             "--hidden-import",
             "tkinter",
             "--hidden-import",

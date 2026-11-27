@@ -616,6 +616,66 @@ class OtaConsoleTests(unittest.TestCase):
             self.assertEqual(st_ls, 200)
             self.assertEqual(ls["entries"][0]["name"], "data")
 
+    def test_provision_helpers_and_endpoints(self) -> None:
+        self._configure_console()
+
+        # Pure helper validation
+        self.assertTrue(console.provision_ops.is_valid_uuid_v4("13131313-1313-4131-8131-131313131313"))
+        self.assertFalse(console.provision_ops.is_valid_uuid_v4("JETSON-NX-191-UNPROVISIONED"))
+        self.assertEqual(
+            console.provision_ops.infer_hardware_revision("NVIDIA Jetson Xavier NX Developer Kit"),
+            "jetson-xavier-nx",
+        )
+
+        # ECS issue script & bundle parser round-trip
+        dev_uuid = "44444444-4444-4444-8444-444444444444"
+        script = console.provision_ops.build_ecs_issue_script(
+            dev_uuid,
+            "-----BEGIN CERTIFICATE REQUEST-----\nAAA\n-----END CERTIFICATE REQUEST-----\n",
+            "-----BEGIN PUBLIC KEY-----\nBBB\n-----END PUBLIC KEY-----\n",
+        )
+        self.assertIn(dev_uuid, script)
+        self.assertIn("mosquitto --test-config", script)
+
+        sample_out = (
+            f"noise\n{console.provision_ops.ECS_BUNDLE_BEGIN}\n"
+            + json.dumps(
+                {
+                    "deviceId": dev_uuid,
+                    "deviceCrt": "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----",
+                    "caCrt": "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----",
+                    "gatewaySigningPub": "-----BEGIN PUBLIC KEY-----\nGW\n-----END PUBLIC KEY-----",
+                }
+            )
+            + f"\n{console.provision_ops.ECS_BUNDLE_END}\n"
+        )
+        parsed = console.provision_ops.parse_ecs_bundle_output(sample_out)
+        self.assertEqual(parsed["deviceId"], dev_uuid)
+        self.assertIn("BEGIN CERTIFICATE", parsed["deviceCrt"])
+        self.assertIn("BEGIN PUBLIC KEY", parsed["gatewaySigningPub"])
+
+        # API route wiring (mocked SSH)
+        with mock.patch.object(
+            console.provision_ops,
+            "probe_robot",
+            return_value={
+                "host": "192.168.66.191",
+                "hostname": "ubuntu",
+                "arch": "aarch64",
+                "hardwareRevision": "jetson-xavier-nx",
+                "suggestedNumber": 4,
+                "suggestedSerial": "THUNDER-DEV-004",
+                "suggestedTunnelPort": 22004,
+            },
+        ):
+            st_p, probed = self._req(
+                "POST",
+                "/api/provision/probe",
+                body={"host": "192.168.66.191", "username": "bsrl1", "password": "pw"},
+            )
+            self.assertEqual(st_p, 200)
+            self.assertEqual(probed["suggestedNumber"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()

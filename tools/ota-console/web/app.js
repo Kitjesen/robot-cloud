@@ -161,6 +161,7 @@
     };
     const STATUS_BADGE = {
       ok: `<span class="badge badge-ok">完成</span>`,
+      pending: `<span class="badge badge-warn">待完成</span>`,
       dry_run: `<span class="badge badge-info">预检</span>`,
       skipped: `<span class="badge badge-neutral">跳过</span>`,
     };
@@ -584,6 +585,10 @@
     $("cfg-ops-key-status").textContent = cfg.opsJumpKeyReady ? "已就绪" : "未检测到";
     $("cfg-ops-robot-user").value = cfg.opsRobotUser || "sunrise";
     $("cfg-ops-pwd-status").textContent = cfg.opsRobotPasswordConfigured ? "已配置" : "未配置";
+    $("cfg-owner-email").value = cfg.defaultOwnerEmail || "";
+    $("cfg-ecs-instance").value = cfg.ecsInstanceId || "";
+    $("cfg-ecsak-status").textContent = cfg.ecsAkIdConfigured ? `已配置 ${cfg.ecsAkIdPreview}` : "未配置";
+    $("cfg-ecssec-status").textContent = cfg.ecsAkSecretConfigured ? "已配置" : "未配置";
   }
 
   function renderLocalArtifactChips() {
@@ -706,11 +711,13 @@
 
   // Robot Remote Ops Helpers
   function currentOpsTarget() {
+    const username = $("ops-user-override")?.value.trim() || undefined;
+    const password = $("ops-pwd-override")?.value.trim() || undefined;
     if (STATE.opsMode === "direct") {
-      return { mode: "direct", host: $("ops-direct-host").value.trim(), port: 22 };
+      return { mode: "direct", host: $("ops-direct-host").value.trim(), port: 22, username, password };
     }
     const port = Number($("ops-tunnel-select").value || 0);
-    return { mode: "tunnel", port };
+    return { mode: "tunnel", port, username, password };
   }
 
   function setOpsMode(mode) {
@@ -1094,7 +1101,153 @@
     $("release-search").addEventListener("input", () => renderReleases(STATE.overview?.releases));
     $("btn-manual-push").addEventListener("click", () => openPushDrawer());
     $("btn-add-device").addEventListener("click", () => openDeviceDrawer(null));
+    $("btn-open-provision").addEventListener("click", () => openProvisionDrawer());
     $("btn-open-bundle").addEventListener("click", () => openBundleDrawer());
+
+    // One-Click Provision Drawer Events
+    let lastProvisionResult = null;
+    function openProvisionDrawer() {
+      const cfg = STATE.overview?.config || {};
+      $("prov-model").value = cfg.defaultModel || "THUNDER 01";
+      $("prov-owner").value = cfg.defaultOwnerEmail || "";
+      $("prov-result-box").classList.add("hidden");
+      $("prov-ecs-manual-box").classList.add("hidden");
+      $("prov-ecs-bundle").value = "";
+      $("prov-probe-summary").textContent = "输入地址后先探测硬件与空闲编号";
+      lastProvisionResult = null;
+      openDrawer("drawer-provision");
+    }
+
+    $("prov-num").addEventListener("input", () => {
+      const n = Number($("prov-num").value || 0);
+      if (n >= 1 && n <= 999) {
+        const pad = String(n).padStart(3, "0");
+        $("prov-serial").value = `THUNDER-DEV-${pad}`;
+        $("prov-tunnel-port").value = String(22000 + n);
+      }
+    });
+
+    $("btn-prov-probe").addEventListener("click", async () => {
+      const btn = $("btn-prov-probe");
+      const summary = $("prov-probe-summary");
+      btn.disabled = true;
+      summary.textContent = "正在探测机器狗与云端空闲编号…";
+      try {
+        const res = await apiFetch("/api/provision/probe", {
+          json: {
+            host: $("prov-host").value.trim(),
+            username: $("prov-user").value.trim(),
+            password: $("prov-pwd").value,
+          },
+        });
+        $("prov-hw").value = res.hardwareRevision || "";
+        $("prov-model").value = res.model || "THUNDER 01";
+        $("prov-num").value = String(res.suggestedNumber || 4);
+        $("prov-serial").value = res.suggestedSerial || "";
+        $("prov-tunnel-port").value = String(res.suggestedTunnelPort || 22004);
+        $("prov-device-id").value = res.existingValidUuid || res.suggestedUuid || "";
+        summary.textContent = res.alreadyProvisioned
+          ? `已存在身份 ${res.existingValidUuid} · ${res.hardwareRevision}`
+          : `${res.hostname} · ${res.hardwareRevision} · ${res.brainstemVersion || "就绪"}`;
+        toast("探测成功，已自动填充推荐参数", "ok");
+      } catch (err) {
+        summary.textContent = err.message;
+        toast(err.message, "err");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    $("provision-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = $("btn-prov-submit");
+      const box = $("prov-result-box");
+      const ecsBox = $("prov-ecs-manual-box");
+      btn.disabled = true;
+      ecsBox.classList.add("hidden");
+      box.innerHTML = "<div>正在执行签发入网，请稍候…</div>";
+      box.classList.remove("hidden");
+      try {
+        const num = Number($("prov-num").value || 4);
+        const hw = $("prov-hw").value.trim();
+        const res = await apiFetch("/api/provision/run", {
+          json: {
+            host: $("prov-host").value.trim(),
+            username: $("prov-user").value.trim(),
+            password: $("prov-pwd").value,
+            robotNumber: num,
+            serialNumber: $("prov-serial").value.trim(),
+            tunnelPort: Number($("prov-tunnel-port").value || 22000 + num),
+            model: $("prov-model").value.trim(),
+            hardwareRevision: hw,
+            ring: $("prov-ring").value,
+            ownerEmail: $("prov-owner").value.trim(),
+            deviceId: $("prov-device-id").value.trim(),
+            tags: [`dog${num}`, hw].filter(Boolean),
+            enableInventory: $("prov-opt-inv").checked,
+            enableOta: $("prov-opt-ota").checked,
+            enableTunnel: $("prov-opt-tunnel").checked,
+            enableCloudLinkKeys: $("prov-opt-mqtt").checked,
+          },
+        });
+        lastProvisionResult = res;
+        $("prov-device-id").value = res.deviceId || "";
+        const tail =
+          res.ecsStatus === "manual_required"
+            ? `设备 ${res.deviceId} 已完成 OTA 与隧道入网，还差一步 ECS 证书签发`
+            : `设备 ${res.deviceId} 已全部签发入网`;
+        renderSteps(box, res.steps, tail);
+        if (res.ecsStatus === "manual_required" && res.ecsScript) {
+          ecsBox.classList.remove("hidden");
+        }
+        toast("签发流程已执行完成", "ok");
+        await refreshAll(true);
+      } catch (err) {
+        box.innerHTML = `<div style="color:var(--err-text)">${esc(err.message)}</div>`;
+        toast(err.message, "err");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    $("btn-prov-copy-ecs").addEventListener("click", async () => {
+      if (!lastProvisionResult?.ecsScript) return;
+      try {
+        await navigator.clipboard.writeText(lastProvisionResult.ecsScript);
+        toast("已复制 ECS 签发脚本", "ok");
+      } catch {
+        toast("复制失败，请手动选中复制", "err");
+      }
+    });
+
+    $("btn-prov-finish-mqtt").addEventListener("click", async () => {
+      const btn = $("btn-prov-finish-mqtt");
+      const bundleText = $("prov-ecs-bundle").value.trim();
+      if (!bundleText) {
+        toast("请先粘贴 ECS 签发回执", "err");
+        return;
+      }
+      btn.disabled = true;
+      try {
+        const res = await apiFetch("/api/provision/finish-mqtt", {
+          json: {
+            host: $("prov-host").value.trim(),
+            username: $("prov-user").value.trim(),
+            password: $("prov-pwd").value,
+            deviceId: $("prov-device-id").value.trim(),
+            bundleText,
+            enableService: true,
+          },
+        });
+        toast(`连云证书已安装 (${res.serviceState})`, "ok");
+        $("prov-ecs-manual-box").classList.add("hidden");
+        await refreshAll(true);
+      } catch (err) {
+        toast(err.message, "err");
+      } finally {
+        btn.disabled = false;
+      }
+    });
 
     $("devices-tbody").addEventListener("click", (e) => {
       const pushBtn = e.target.closest("[data-push-device]");
@@ -1603,12 +1756,18 @@
             opsJumpKey: $("cfg-ops-key").value.trim(),
             opsRobotUser: $("cfg-ops-robot-user").value.trim(),
             opsRobotPassword: $("cfg-ops-robot-pwd").value.trim() || undefined,
+            defaultOwnerEmail: $("cfg-owner-email").value.trim(),
+            ecsInstanceId: $("cfg-ecs-instance").value.trim(),
+            ecsAccessKeyId: $("cfg-ecs-ak-id").value.trim() || undefined,
+            ecsAccessKeySecret: $("cfg-ecs-ak-secret").value.trim() || undefined,
           },
         });
         $("cfg-api-token").value = "";
         $("cfg-oss-ak-id").value = "";
         $("cfg-oss-ak-secret").value = "";
         $("cfg-ops-robot-pwd").value = "";
+        $("cfg-ecs-ak-id").value = "";
+        $("cfg-ecs-ak-secret").value = "";
         populateSettingsForm(updated);
         toast("配置已保存", "ok");
         await refreshAll(true);

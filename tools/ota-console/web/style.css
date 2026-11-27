@@ -511,6 +511,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .search-input,
 .field input[type="text"],
+.field input[type="email"],
 .field input[type="url"],
 .field input[type="password"],
 .field input[type="number"],
@@ -525,6 +526,18 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   color: var(--text);
   font-family: inherit;
   font-size: 13px;
+}
+
+.ops-connect-group input[type="text"],
+.ops-connect-group input[type="password"] {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
 }
 
 .search-input {

@@ -37,12 +37,14 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     REPO_ROOT = Path(sys.executable).resolve().parent
     OPS_SCRIPT_PATH = _BUNDLE_ROOT / "doso-ota-ops.py"
     ROBOT_OPS_PATH = _BUNDLE_ROOT / "robot_ops.py"
+    PROVISION_OPS_PATH = _BUNDLE_ROOT / "provision_ops.py"
 else:
     CONSOLE_DIR = Path(__file__).resolve().parent
     WEB_DIR = CONSOLE_DIR / "web"
     REPO_ROOT = CONSOLE_DIR.parent.parent
     OPS_SCRIPT_PATH = REPO_ROOT / "tools" / "deploy" / "doso-ota-ops.py"
     ROBOT_OPS_PATH = CONSOLE_DIR / "robot_ops.py"
+    PROVISION_OPS_PATH = CONSOLE_DIR / "provision_ops.py"
 
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
@@ -66,6 +68,11 @@ CONFIG_KEYS = (
     "DOSO_OPS_ROBOT_USER",
     "DOSO_OPS_ROBOT_PASSWORD",
     "DOSO_OPS_ROBOT_KEY",
+    "DOSO_ECS_INSTANCE_ID",
+    "DOSO_ECS_REGION",
+    "DOSO_ECS_ACCESS_KEY_ID",
+    "DOSO_ECS_ACCESS_KEY_SECRET",
+    "DOSO_DEFAULT_OWNER_EMAIL",
 )
 SECRET_CONFIG_KEYS = frozenset(
     {
@@ -73,6 +80,8 @@ SECRET_CONFIG_KEYS = frozenset(
         "DOSO_OSS_ACCESS_KEY_ID",
         "DOSO_OSS_ACCESS_KEY_SECRET",
         "DOSO_OPS_ROBOT_PASSWORD",
+        "DOSO_ECS_ACCESS_KEY_ID",
+        "DOSO_ECS_ACCESS_KEY_SECRET",
     }
 )
 DEFAULT_CONFIG: dict[str, str] = {
@@ -92,6 +101,11 @@ DEFAULT_CONFIG: dict[str, str] = {
     "DOSO_OPS_ROBOT_USER": "sunrise",
     "DOSO_OPS_ROBOT_PASSWORD": "",
     "DOSO_OPS_ROBOT_KEY": "",
+    "DOSO_ECS_INSTANCE_ID": "i-uf6hb2phe34p0mt1xfca",
+    "DOSO_ECS_REGION": "cn-shanghai",
+    "DOSO_ECS_ACCESS_KEY_ID": "",
+    "DOSO_ECS_ACCESS_KEY_SECRET": "",
+    "DOSO_DEFAULT_OWNER_EMAIL": "995632531@qq.com",
 }
 
 
@@ -106,6 +120,8 @@ def load_module_from_path(name: str, path: Path) -> Any:
 
 ops = load_module_from_path("doso_ota_ops", OPS_SCRIPT_PATH)
 robot_ops = load_module_from_path("doso_robot_ops", ROBOT_OPS_PATH)
+sys.modules["robot_ops"] = robot_ops
+provision_ops = load_module_from_path("doso_provision_ops", PROVISION_OPS_PATH)
 
 
 def default_config_path() -> Path:
@@ -186,6 +202,8 @@ class ConfigStore:
         ak_id = cfg["DOSO_OSS_ACCESS_KEY_ID"]
         ak_secret = cfg["DOSO_OSS_ACCESS_KEY_SECRET"]
         robot_pwd = cfg["DOSO_OPS_ROBOT_PASSWORD"]
+        ecs_ak_id = cfg["DOSO_ECS_ACCESS_KEY_ID"]
+        ecs_ak_sec = cfg["DOSO_ECS_ACCESS_KEY_SECRET"]
         jump_key_auto = (Path.home() / ".ssh" / "inovxio_deploy").is_file()
         return {
             "cloudUrl": cfg["DOSO_OTA_CLOUD_URL"],
@@ -210,6 +228,13 @@ class ConfigStore:
             "opsRobotKey": cfg["DOSO_OPS_ROBOT_KEY"],
             "opsRobotPasswordConfigured": bool(robot_pwd),
             "opsRobotPasswordPreview": mask_secret(robot_pwd),
+            "ecsInstanceId": cfg["DOSO_ECS_INSTANCE_ID"],
+            "ecsRegion": cfg["DOSO_ECS_REGION"],
+            "ecsAkIdConfigured": bool(ecs_ak_id),
+            "ecsAkIdPreview": mask_secret(ecs_ak_id),
+            "ecsAkSecretConfigured": bool(ecs_ak_sec),
+            "ecsAutoReady": bool(ecs_ak_id and ecs_ak_sec),
+            "defaultOwnerEmail": cfg["DOSO_DEFAULT_OWNER_EMAIL"],
         }
 
     def update(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -228,6 +253,9 @@ class ConfigStore:
                 "opsJumpKey": "DOSO_OPS_JUMP_KEY",
                 "opsRobotUser": "DOSO_OPS_ROBOT_USER",
                 "opsRobotKey": "DOSO_OPS_ROBOT_KEY",
+                "ecsInstanceId": "DOSO_ECS_INSTANCE_ID",
+                "ecsRegion": "DOSO_ECS_REGION",
+                "defaultOwnerEmail": "DOSO_DEFAULT_OWNER_EMAIL",
             }
             for json_key, env_key in field_map.items():
                 if json_key in payload and payload[json_key] is not None:
@@ -236,7 +264,7 @@ class ConfigStore:
                         if not val.startswith(("http://", "https://")):
                             raise ops.OpsError("云端地址必须以 http:// 或 https:// 开头")
                         val = val.rstrip("/")
-                    if val or env_key in ("DOSO_OPS_JUMP_KEY", "DOSO_OPS_ROBOT_KEY"):
+                    if val or env_key in ("DOSO_OPS_JUMP_KEY", "DOSO_OPS_ROBOT_KEY", "DOSO_DEFAULT_OWNER_EMAIL"):
                         next_vals[env_key] = val
 
             secret_map = {
@@ -244,6 +272,8 @@ class ConfigStore:
                 "ossAccessKeyId": ("DOSO_OSS_ACCESS_KEY_ID", "clearOssCredentials"),
                 "ossAccessKeySecret": ("DOSO_OSS_ACCESS_KEY_SECRET", "clearOssCredentials"),
                 "opsRobotPassword": ("DOSO_OPS_ROBOT_PASSWORD", "clearOpsRobotPassword"),
+                "ecsAccessKeyId": ("DOSO_ECS_ACCESS_KEY_ID", "clearEcsCredentials"),
+                "ecsAccessKeySecret": ("DOSO_ECS_ACCESS_KEY_SECRET", "clearEcsCredentials"),
             }
             for json_key, (env_key, clear_flag) in secret_map.items():
                 if payload.get(clear_flag):
@@ -1254,7 +1284,7 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     return
 
                 self._serve_static(path)
-            except (ops.OpsError, robot_ops.RobotOpsError) as exc:
+            except (ops.OpsError, robot_ops.RobotOpsError, provision_ops.ProvisionError) as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
@@ -1369,6 +1399,24 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                         token,
                     )
                     self._send_json(HTTPStatus.OK, deleted)
+                    return
+
+                if path == "/api/provision/probe":
+                    cfg = ctx.config_store.effective()
+                    res = provision_ops.probe_robot(cfg, body)
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/provision/run":
+                    cfg = ctx.config_store.effective()
+                    res = provision_ops.provision_robot(cfg, ops, body, repo_root=REPO_ROOT)
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/provision/finish-mqtt":
+                    cfg = ctx.config_store.effective()
+                    res = provision_ops.finish_mqtt_on_robot(cfg, body)
+                    self._send_json(HTTPStatus.OK, res)
                     return
 
                 if path == "/api/ops/status":
@@ -1554,7 +1602,7 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     return
 
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown_api"})
-            except (ops.OpsError, robot_ops.RobotOpsError) as exc:
+            except (ops.OpsError, robot_ops.RobotOpsError, provision_ops.ProvisionError) as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except ValueError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})

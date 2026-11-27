@@ -36,6 +36,7 @@ PROTECTED_DELETE_PATHS = frozenset(
         "/etc/doso",
         "/home",
         "/home/sunrise",
+        "/home/bsrl1",
         "/lib",
         "/lib64",
         "/opt",
@@ -149,14 +150,16 @@ def _connect_jump(cfg: dict[str, str], timeout_s: int = 8) -> Any:
         raise RobotOpsError(f"连接云端运维跳板失败: {exc}") from exc
 
 
-def _robot_auth_kwargs(cfg: dict[str, str]) -> dict[str, Any]:
+def _robot_auth_kwargs(cfg: dict[str, str], target: dict[str, Any] | None = None) -> dict[str, Any]:
+    t = target or {}
+    username = str(t.get("username") or cfg.get("DOSO_OPS_ROBOT_USER") or "sunrise").strip() or "sunrise"
+    password = str(t.get("password") or cfg.get("DOSO_OPS_ROBOT_PASSWORD") or "").strip()
+    key_path = str(t.get("keyPath") or cfg.get("DOSO_OPS_ROBOT_KEY") or "").strip()
     kwargs: dict[str, Any] = {
-        "username": (cfg.get("DOSO_OPS_ROBOT_USER") or "sunrise").strip() or "sunrise",
+        "username": username,
         "look_for_keys": False,
         "allow_agent": False,
     }
-    key_path = (cfg.get("DOSO_OPS_ROBOT_KEY") or "").strip()
-    password = (cfg.get("DOSO_OPS_ROBOT_PASSWORD") or "").strip()
     if key_path:
         p = Path(key_path).expanduser()
         if not p.is_file():
@@ -173,7 +176,7 @@ def _robot_auth_kwargs(cfg: dict[str, str]) -> dict[str, Any]:
 def open_robot_ssh(cfg: dict[str, str], target: dict[str, Any], timeout_s: int = 10) -> Iterator[Any]:
     paramiko = _require_paramiko()
     mode = str(target.get("mode") or "tunnel").strip()
-    auth = _robot_auth_kwargs(cfg)
+    auth = _robot_auth_kwargs(cfg, target)
 
     jump_client: Any = None
     robot_client = paramiko.SSHClient()
@@ -248,8 +251,15 @@ def _exec_cmd(client: Any, cmd: str, timeout_s: int = 12, stdin_text: str | None
     return code, out, err
 
 
-def _exec_sudo(client: Any, cfg: dict[str, str], inner_cmd: str, timeout_s: int = 15) -> tuple[int, str, str]:
-    password = (cfg.get("DOSO_OPS_ROBOT_PASSWORD") or "").strip()
+def _exec_sudo(
+    client: Any,
+    cfg: dict[str, str],
+    inner_cmd: str,
+    timeout_s: int = 15,
+    target: dict[str, Any] | None = None,
+) -> tuple[int, str, str]:
+    t = target or {}
+    password = str(t.get("password") or cfg.get("DOSO_OPS_ROBOT_PASSWORD") or "").strip()
     if password:
         return _exec_cmd(
             client,
@@ -376,7 +386,7 @@ def control_service(cfg: dict[str, str], target: dict[str, Any], unit: str, acti
             if h.get("motor_output_enabled") is True:
                 raise RobotOpsError("电机使能开启中，禁止停止或重启主控")
 
-        code, out, err = _exec_sudo(client, cfg, f"systemctl {clean_action} {shlex.quote(clean_unit)}", timeout_s=20)
+        code, out, err = _exec_sudo(client, cfg, f"systemctl {clean_action} {shlex.quote(clean_unit)}", timeout_s=20, target=target)
         if code != 0:
             raise RobotOpsError(f"执行失败: {(err or out).strip()}")
         _, st_out, _ = _exec_cmd(client, f"systemctl is-active {shlex.quote(clean_unit)} || true", timeout_s=5)
@@ -398,6 +408,7 @@ def get_service_logs(
             cfg,
             f"journalctl -u {shlex.quote(clean_unit)} -n {n} --no-pager",
             timeout_s=12,
+            target=target,
         )
         if code != 0:
             raise RobotOpsError(f"读取日志失败: {(err or out).strip()}")
@@ -456,7 +467,7 @@ def read_text_file(cfg: dict[str, str], target: dict[str, Any], remote_path: str
                 raw = fh.read(MAX_TEXT_EDIT_BYTES + 1)
         except PermissionError:
             sftp.close()
-            code, out, err = _exec_sudo(client, cfg, f"head -c {MAX_TEXT_EDIT_BYTES + 1} {shlex.quote(norm)}", timeout_s=10)
+            code, out, err = _exec_sudo(client, cfg, f"head -c {MAX_TEXT_EDIT_BYTES + 1} {shlex.quote(norm)}", timeout_s=10, target=target)
             if code != 0:
                 raise RobotOpsError(f"读取文件失败: {err.strip()}")
             raw = out.encode("utf-8")
@@ -498,7 +509,7 @@ def write_text_file(cfg: dict[str, str], target: dict[str, Any], remote_path: st
             f"if test -f {shlex.quote(norm)}; then cp -a {shlex.quote(norm)} {shlex.quote(norm + '.bak.' + ts)}; fi; "
             f"cat {shlex.quote(tmp_remote)} > {shlex.quote(norm)} && rm -f {shlex.quote(tmp_remote)}"
         )
-        code, _, err = _exec_sudo(client, cfg, inner, timeout_s=12)
+        code, _, err = _exec_sudo(client, cfg, inner, timeout_s=12, target=target)
         if code != 0:
             _exec_cmd(client, f"rm -f {shlex.quote(tmp_remote)}", timeout_s=5)
             raise RobotOpsError(f"保存文件失败: {err.strip()}")
@@ -532,6 +543,7 @@ def upload_file(
                 cfg,
                 f"mv -f {shlex.quote(tmp_remote)} {shlex.quote(dest)}",
                 timeout_s=15,
+                target=target,
             )
             if code != 0:
                 _exec_cmd(client, f"rm -f {shlex.quote(tmp_remote)}", timeout_s=5)
@@ -574,7 +586,7 @@ def make_dir(cfg: dict[str, str], target: dict[str, Any], remote_path: str) -> d
             sftp.mkdir(norm)
         except PermissionError:
             sftp.close()
-            code, _, err = _exec_sudo(client, cfg, f"mkdir -p {shlex.quote(norm)}", timeout_s=10)
+            code, _, err = _exec_sudo(client, cfg, f"mkdir -p {shlex.quote(norm)}", timeout_s=10, target=target)
             if code != 0:
                 raise RobotOpsError(f"创建目录失败: {err.strip()}")
         except Exception as exc:
@@ -605,6 +617,7 @@ def delete_path(cfg: dict[str, str], target: dict[str, Any], remote_path: str) -
                 cfg,
                 f"if test -d {shlex.quote(norm)}; then rmdir {shlex.quote(norm)}; else rm -f {shlex.quote(norm)}; fi",
                 timeout_s=10,
+                target=target,
             )
             if code != 0:
                 raise RobotOpsError(f"删除失败（非空目录需先清空）: {err.strip()}")

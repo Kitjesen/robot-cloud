@@ -118,6 +118,7 @@
               <h2>车队设备</h2>
               <div class="section-actions">
                 <input class="search-input" id="device-search" type="search" placeholder="搜索设备编号、分环或版本" />
+                <button class="btn btn-primary btn-sm" id="btn-open-provision" type="button">新机签发</button>
                 <button class="btn btn-ghost btn-sm" id="btn-add-device" type="button">登记设备</button>
                 <button class="btn btn-ghost btn-sm" id="btn-manual-push" type="button">按编号推送</button>
               </div>
@@ -286,8 +287,10 @@
                 <button class="btn btn-ghost btn-sm" id="btn-ops-scan" type="button">扫描在线通道</button>
               </div>
               <div id="ops-direct-picker" class="ops-inline hidden">
-                <input id="ops-direct-host" type="text" placeholder="192.168.66.13" value="192.168.66.13" style="width:160px;" />
+                <input id="ops-direct-host" type="text" placeholder="192.168.66.13" value="192.168.66.13" style="width:140px;" />
               </div>
+              <input id="ops-user-override" type="text" placeholder="账号(默认)" style="width:92px;" />
+              <input id="ops-pwd-override" type="password" autocomplete="off" placeholder="密码(默认)" style="width:92px;" />
             </div>
             <button class="btn btn-primary btn-sm" id="btn-ops-connect" type="button">连接机器狗</button>
           </div>
@@ -471,6 +474,28 @@
                 <div class="field">
                   <label for="cfg-ops-robot-pwd">机端密码 <span class="field-status" id="cfg-ops-pwd-status"></span></label>
                   <input id="cfg-ops-robot-pwd" type="password" autocomplete="off" placeholder="留空保持当前配置" />
+                </div>
+              </div>
+
+              <div class="section-subhead">新机签发</div>
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="cfg-owner-email">默认归属邮箱</label>
+                  <input id="cfg-owner-email" type="email" placeholder="995632531@qq.com" />
+                </div>
+                <div class="field">
+                  <label for="cfg-ecs-instance">签发实例 ID</label>
+                  <input id="cfg-ecs-instance" type="text" placeholder="i-uf6hb2phe34p0mt1xfca" />
+                </div>
+              </div>
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="cfg-ecs-ak-id">自动签发 Key ID <span class="field-status" id="cfg-ecsak-status"></span></label>
+                  <input id="cfg-ecs-ak-id" type="password" autocomplete="off" placeholder="选填，留空保持当前配置" />
+                </div>
+                <div class="field">
+                  <label for="cfg-ecs-ak-secret">自动签发 Secret <span class="field-status" id="cfg-ecssec-status"></span></label>
+                  <input id="cfg-ecs-ak-secret" type="password" autocomplete="off" placeholder="选填，留空保持当前配置" />
                 </div>
               </div>
 
@@ -670,6 +695,112 @@
         <div class="drawer-foot">
           <button class="btn btn-ghost" data-close-drawer="drawer-bundle" type="button">取消</button>
           <button class="btn btn-primary" type="submit">生成组合包</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Slide-over Drawer: One-Click Provision Robot -->
+  <div class="drawer-backdrop hidden" id="drawer-provision">
+    <div class="drawer drawer-wide" role="dialog" aria-modal="true" aria-labelledby="drawer-provision-title">
+      <div class="drawer-head">
+        <h2 id="drawer-provision-title">新机一键签发</h2>
+        <button class="icon-btn" data-close-drawer="drawer-provision" type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form class="drawer-body" id="provision-form">
+        <div class="form-grid-3">
+          <div class="field">
+            <label for="prov-host">机器狗 IP</label>
+            <input id="prov-host" type="text" placeholder="192.168.66.191" required />
+          </div>
+          <div class="field">
+            <label for="prov-user">登录账号</label>
+            <input id="prov-user" type="text" placeholder="bsrl1" required />
+          </div>
+          <div class="field">
+            <label for="prov-pwd">登录密码</label>
+            <input id="prov-pwd" type="password" autocomplete="off" placeholder="密码" required />
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+          <button class="btn btn-ghost btn-sm" id="btn-prov-probe" type="button">连接探测</button>
+          <span class="sub-line" id="prov-probe-summary">输入地址后先探测硬件与空闲编号</span>
+        </div>
+
+        <div class="form-grid-3">
+          <div class="field">
+            <label for="prov-num">机器编号</label>
+            <input id="prov-num" type="number" min="1" max="999" value="4" required />
+          </div>
+          <div class="field">
+            <label for="prov-serial">出厂序列号</label>
+            <input id="prov-serial" type="text" placeholder="THUNDER-DEV-004" required />
+          </div>
+          <div class="field">
+            <label for="prov-tunnel-port">运维端口</label>
+            <input id="prov-tunnel-port" type="number" min="22001" max="22999" value="22004" required />
+          </div>
+        </div>
+
+        <div class="form-grid-3">
+          <div class="field">
+            <label for="prov-model">机型</label>
+            <input id="prov-model" type="text" value="THUNDER 01" required />
+          </div>
+          <div class="field">
+            <label for="prov-hw">硬件版本</label>
+            <input id="prov-hw" type="text" placeholder="自动识别" required />
+          </div>
+          <div class="field">
+            <label for="prov-ring">发布分环</label>
+            <select id="prov-ring">
+              <option value="canary">canary</option>
+              <option value="dev">dev</option>
+              <option value="prod">prod</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-grid-2">
+          <div class="field">
+            <label for="prov-owner">归属账号邮箱</label>
+            <input id="prov-owner" type="email" placeholder="995632531@qq.com" />
+          </div>
+          <div class="field">
+            <label for="prov-device-id">设备 UUID</label>
+            <input id="prov-device-id" type="text" class="mono" placeholder="留空自动生成" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>开通项目</label>
+          <div style="display:flex;flex-wrap:wrap;gap:14px;padding-top:4px;">
+            <label class="checkbox-label"><input id="prov-opt-inv" type="checkbox" checked /><span>业务库存</span></label>
+            <label class="checkbox-label"><input id="prov-opt-ota" type="checkbox" checked /><span>OTA 服务</span></label>
+            <label class="checkbox-label"><input id="prov-opt-tunnel" type="checkbox" checked /><span>云端隧道</span></label>
+            <label class="checkbox-label"><input id="prov-opt-mqtt" type="checkbox" checked /><span>独立连云密钥</span></label>
+          </div>
+        </div>
+
+        <div class="step-result hidden" id="prov-result-box"></div>
+
+        <div class="section-block hidden" id="prov-ecs-manual-box" style="margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-subtle);">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <strong>签发连云证书</strong>
+            <button class="btn btn-ghost btn-sm" id="btn-prov-copy-ecs" type="button">复制签发脚本</button>
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label for="prov-ecs-bundle">粘贴签发回执</label>
+            <textarea id="prov-ecs-bundle" rows="4" class="mono" placeholder="在云端实例执行脚本后，粘贴输出结果"></textarea>
+          </div>
+          <button class="btn btn-primary btn-sm" id="btn-prov-finish-mqtt" type="button">写入证书并启用连云</button>
+        </div>
+
+        <div class="drawer-foot">
+          <button class="btn btn-ghost" data-close-drawer="drawer-provision" type="button">关闭</button>
+          <button class="btn btn-primary" id="btn-prov-submit" type="submit">一键签发</button>
         </div>
       </form>
     </div>
