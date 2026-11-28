@@ -413,7 +413,7 @@ pub async fn poll_and_execute_once<C: HealthCheck + ?Sized + 'static>(
                     phase: "failed".into(),
                     bytes_downloaded: Some(0),
                     current_version: Some(ver),
-                    message: Some(error.to_string()),
+                    message: Some(format!("{error:#}")),
                 };
                 drop(guard);
                 if let Err(rep_err) = cloud.report_job(&device_id, &next.job_id, &report).await {

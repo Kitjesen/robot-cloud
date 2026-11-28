@@ -22,6 +22,8 @@ SPEC.loader.exec_module(ops)
 
 class MockReleaseHandler(BaseHTTPRequestHandler):
     requests_log: list[tuple[str, str, str | None, dict | None]] = []
+    job_phases: list[str] = ["succeeded"]
+    android_latest: dict | None = None
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         return
@@ -47,6 +49,13 @@ class MockReleaseHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"rolloutId": "ro-1", "status": "active"})
         elif self.path == "/ota/v1/devices/status":
             self._send_json(200, [{"deviceId": "dev-1", "firmwareVersion": "v0.0.3"}])
+        elif self.path == "/ota/v1/releases":
+            self._send_json(200, [{"releaseId": "rel-pub-1", "version": "0.0.4", "sequence": 4}])
+        elif self.path == "/ota/v1/devices/dev-1/firmware/jobs/job-1":
+            phase = self.job_phases.pop(0) if len(self.job_phases) > 1 else self.job_phases[0]
+            self._send_json(200, {"jobId": "job-1", "deviceId": "dev-1", "phase": phase, "bytesDownloaded": 128})
+        elif self.path.startswith("/ota/v1/apps/android/latest?") and self.android_latest:
+            self._send_json(200, self.android_latest)
         else:
             self._send_json(404, {"error": {"code": "not_found"}})
 
@@ -54,7 +63,33 @@ class MockReleaseHandler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization")
         body = self._read_json()
         self.requests_log.append(("POST", self.path, auth, body))
-        if self.path == "/ota/v1/rollouts":
+        if self.path == "/ota/v1/releases":
+            manifest = body["manifest"]
+            self._send_json(
+                201,
+                {
+                    "releaseId": manifest["releaseId"],
+                    "version": manifest["version"],
+                    "sequence": manifest["sequence"],
+                },
+            )
+        elif self.path == "/ota/v1/apps/android/releases":
+            MockReleaseHandler.android_latest = {
+                "channel": body["channel"],
+                "versionName": body["versionName"],
+                "versionCode": body["versionCode"],
+                "minSupportedCode": body.get("minSupportedCode", 0),
+                "mandatory": body.get("mandatory", False),
+                "updateAvailable": True,
+                "forceUpdate": False,
+                "changelog": body.get("changelog", ""),
+                "apkSha256": body["apkSha256"],
+                "apkSizeBytes": body["apkSizeBytes"],
+                "downloadUrl": "https://oss.example/signed.apk",
+                "publishedAtMs": 1700000000000,
+            }
+            self._send_json(200, body)
+        elif self.path == "/ota/v1/rollouts":
             self._send_json(201, {"rolloutId": "ro-1", "status": "active", "releaseId": body["releaseId"]})
         elif self.path in (
             "/ota/v1/rollouts/ro-1/promote",
@@ -63,7 +98,7 @@ class MockReleaseHandler(BaseHTTPRequestHandler):
         ):
             self._send_json(200, {"rolloutId": "ro-1", "action": self.path.rsplit("/", 1)[-1]})
         elif self.path == "/ota/v1/devices/dev-1/firmware/jobs":
-            self._send_json(202, {"jobId": "job-1", "releaseId": body["releaseId"]})
+            self._send_json(202, {"jobId": "job-1", "releaseId": body["releaseId"], "phase": "scheduled"})
         else:
             self._send_json(404, {"error": {"code": "not_found"}})
 
@@ -345,6 +380,141 @@ class DosoOtaOpsTests(unittest.TestCase):
         finally:
             if old_url is not None:
                 os.environ["DOSO_OTA_CLOUD_URL"] = old_url
+
+    def test_one_click_publish_robot_and_android_end_to_end(self) -> None:
+        bs_src = self.root / "bs_pub"
+        (bs_src / "bin").mkdir(parents=True)
+        (bs_src / "bin" / "doso-brainstem").write_bytes(b"\x7fELFbrainstem-v4")
+        apk_file = self.root / "doso-0.0.2.apk"
+        apk_file.write_bytes(b"PK\x03\x04fake-apk-payload")
+        saved_tpl = self.root / "saved-template.json"
+
+        oss_calls: list[tuple[str, str]] = []
+        orig_oss_request = ops.oss_request
+
+        def fake_oss_request(method, bucket, endpoint, object_key, ak_id, ak_secret, body_path=None, content_type=""):
+            oss_calls.append((method, object_key))
+            if method == "HEAD":
+                return 404, {}, b""
+            if method == "PUT":
+                return 200, {"etag": '"fake-etag"'}, b""
+            raise AssertionError(f"unexpected OSS method {method}")
+
+        old_env = {k: os.environ.get(k) for k in ("DOSO_OSS_ACCESS_KEY_ID", "DOSO_OSS_ACCESS_KEY_SECRET", "DOSO_RELEASE_API_TOKEN")}
+        os.environ["DOSO_OSS_ACCESS_KEY_ID"] = "ak-test"
+        os.environ["DOSO_OSS_ACCESS_KEY_SECRET"] = "sk-test"
+        os.environ["DOSO_RELEASE_API_TOKEN"] = "tok-publish-123"
+        ops.oss_request = fake_oss_request
+
+        MockReleaseHandler.requests_log = []
+        MockReleaseHandler.job_phases = ["downloading", "waiting_safe_window", "succeeded"]
+        MockReleaseHandler.android_latest = None
+        server = ThreadingHTTPServer(("127.0.0.1", 0), MockReleaseHandler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}/ota"
+
+            # 1. Dry-run robot publish writes template and touches neither OSS nor API.
+            rc_dry = ops.main(
+                [
+                    "--base-url",
+                    base,
+                    "publish",
+                    "--type",
+                    "brainstem_release",
+                    "--source-dir",
+                    str(bs_src),
+                    "--release-id",
+                    "bs-v0.0.4",
+                    "--version",
+                    "0.0.4",
+                    "--sequence",
+                    "4",
+                    "--channel",
+                    "qa",
+                    "--save-template",
+                    str(saved_tpl),
+                    "--dry-run",
+                ]
+            )
+            self.assertEqual(rc_dry, 0)
+            self.assertTrue(saved_tpl.is_file())
+            self.assertEqual(oss_calls, [])
+            self.assertEqual(MockReleaseHandler.requests_log, [])
+
+            # 2. Live one-click robot publish + single-device dispatch + --watch until succeeded.
+            rc_pub = ops.main(
+                [
+                    "--base-url",
+                    base,
+                    "publish",
+                    "--type",
+                    "brainstem_release",
+                    "--source-dir",
+                    str(bs_src),
+                    "--release-id",
+                    "bs-v0.0.4",
+                    "--version",
+                    "0.0.4",
+                    "--sequence",
+                    "4",
+                    "--channel",
+                    "qa",
+                    "--device-id",
+                    "dev-1",
+                    "--watch",
+                    "--poll-interval",
+                    "0.05",
+                ]
+            )
+            self.assertEqual(rc_pub, 0)
+            self.assertIn(("HEAD", "firmware/qa/bs-v0.0.4/brainstem.tar.gz"), oss_calls)
+            self.assertIn(("PUT", "firmware/qa/bs-v0.0.4/brainstem.tar.gz"), oss_calls)
+
+            # 3. Standalone register-release & list all releases.
+            self.assertEqual(ops.main(["--base-url", base, "register-release", "--template", str(saved_tpl)]), 0)
+            self.assertEqual(ops.main(["--base-url", base, "releases"]), 0)
+
+            # 4. One-click Android publish (OSS upload + POST /v1/apps/android/releases + public /latest verify).
+            rc_apk = ops.main(
+                [
+                    "--base-url",
+                    base,
+                    "publish-android",
+                    "--apk",
+                    str(apk_file),
+                    "--channel",
+                    "prod",
+                    "--version-name",
+                    "0.0.2",
+                    "--version-code",
+                    "57",
+                    "--min-supported-code",
+                    "56",
+                    "--changelog",
+                    "流畅版与35套动作",
+                ]
+            )
+            self.assertEqual(rc_apk, 0)
+            self.assertIn(("PUT", "apps/android/prod/0.0.2/doso-0.0.2-vc57.apk"), oss_calls)
+
+            paths = [(m, p) for m, p, _, _ in MockReleaseHandler.requests_log]
+            self.assertIn(("POST", "/ota/v1/releases"), paths)
+            self.assertIn(("POST", "/ota/v1/devices/dev-1/firmware/jobs"), paths)
+            self.assertIn(("GET", "/ota/v1/devices/dev-1/firmware/jobs/job-1"), paths)
+            self.assertIn(("GET", "/ota/v1/releases"), paths)
+            self.assertIn(("POST", "/ota/v1/apps/android/releases"), paths)
+            self.assertIn(("GET", "/ota/v1/apps/android/latest?channel=prod&version_code=56"), paths)
+        finally:
+            server.shutdown()
+            server.server_close()
+            ops.oss_request = orig_oss_request
+            for k, old in old_env.items():
+                if old is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old
 
 
 if __name__ == "__main__":

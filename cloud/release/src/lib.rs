@@ -10,13 +10,13 @@ use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{StatusCode, header},
+    http::{Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use doso_ota::{ArtifactType, Manifest, ManifestEnvelope};
+use doso_ota::{ArtifactType, BundleItem, Manifest, ManifestEnvelope, RollbackPolicy};
 use ed25519_dalek::{Signer, SigningKey, pkcs8::DecodePrivateKey};
 use hmac::{Hmac, Mac};
 use rollout::{
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
@@ -41,6 +41,9 @@ use uuid::Uuid;
 
 type HmacSha1 = Hmac<Sha1>;
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+/// Backdate signed manifest `issuedAtMs` slightly so robots whose clocks lag the cloud
+/// server by small NTP drift do not reject freshly dispatched manifests as not-yet-valid.
+const MANIFEST_CLOCK_SKEW_LEEWAY_MS: i64 = 60_000;
 
 fn default_ring() -> String {
     "prod".into()
@@ -58,9 +61,11 @@ pub struct Config {
     pub oss_access_key_id: String,
     pub oss_access_key_secret: String,
     pub signed_url_ttl_seconds: u64,
+    pub app_download_base_url: Option<String>,
+    pub app_download_accel_prefix: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeviceRecord {
     pub model: String,
@@ -72,15 +77,93 @@ pub struct DeviceRecord {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceEntry {
+    pub device_id: String,
+    pub model: String,
+    pub hardware_revision: String,
+    pub enabled: bool,
+    pub ring: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpsertDeviceRequest {
+    pub model: String,
+    pub hardware_revision: String,
+    #[serde(default = "default_true_bool")]
+    pub enabled: bool,
+    #[serde(default = "default_ring")]
+    pub ring: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceRegistryOverlay {
+    #[serde(default)]
+    upserts: BTreeMap<String, DeviceRecord>,
+    #[serde(default)]
+    deleted: BTreeSet<String>,
+}
+
+fn default_min_bootloader() -> String {
+    "1.0.0".into()
+}
+
+fn default_min_brainstem() -> String {
+    "0.0.1".into()
+}
+
+fn default_min_battery() -> u8 {
+    20
+}
+
+fn default_health_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_manifest_ttl_seconds() -> u64 {
+    1800
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateBundleRequest {
+    pub release_id: String,
+    pub version: String,
+    pub sequence: u64,
+    pub channel: String,
+    pub source_release_ids: Vec<String>,
+    #[serde(default = "default_min_bootloader")]
+    pub minimum_bootloader_version: String,
+    #[serde(default = "default_min_brainstem")]
+    pub minimum_brainstem_version: String,
+    #[serde(default = "default_min_battery")]
+    pub minimum_battery_percent: u8,
+    #[serde(default = "default_health_timeout_ms")]
+    pub health_timeout_ms: u64,
+    #[serde(default = "default_manifest_ttl_seconds")]
+    pub manifest_ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReleaseTemplate {
     pub manifest: Manifest,
     #[serde(default)]
     pub object_key: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bundle_object_keys: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta_object_key: Option<String>,
 }
 
@@ -146,6 +229,49 @@ pub struct Job {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct JobSummary {
+    pub job_id: String,
+    pub device_id: String,
+    pub release_id: String,
+    pub idempotency_key: String,
+    pub phase: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub bytes_downloaded: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_id: Option<String>,
+}
+
+impl From<&Job> for JobSummary {
+    fn from(job: &Job) -> Self {
+        Self {
+            job_id: job.job_id.clone(),
+            device_id: job.device_id.clone(),
+            release_id: job.release_id.clone(),
+            idempotency_key: job.idempotency_key.clone(),
+            phase: job.phase.clone(),
+            created_at_ms: job.created_at_ms,
+            updated_at_ms: job.updated_at_ms,
+            bytes_downloaded: job.bytes_downloaded,
+            current_version: job.current_version.clone(),
+            message: job.message.clone(),
+            rollout_id: job.rollout_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ListJobsQuery {
+    device_id: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AndroidAppReleaseTemplate {
     pub channel: String,
     pub version_name: String,
@@ -191,6 +317,14 @@ pub struct AndroidAppLatestQuery {
     pub channel: String,
     #[serde(default)]
     pub version_code: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AndroidAppDownloadQuery {
+    #[serde(default = "default_android_channel")]
+    pub channel: String,
+    #[serde(default)]
+    pub version_code: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,6 +427,8 @@ struct AppState {
     config: Config,
     expected_token_hash: [u8; 32],
     signing_key: Arc<SigningKey>,
+    devices_lock: Arc<Mutex<()>>,
+    releases_lock: Arc<Mutex<()>>,
     jobs: Arc<Mutex<HashMap<String, Job>>>,
     rollouts: Arc<Mutex<HashMap<String, RolloutCampaign>>>,
 }
@@ -313,7 +449,7 @@ pub fn build_router(config: Config) -> Result<Router> {
         "signed_url_ttl_too_small"
     );
     // Validate registry and signing key up front so broken config fails fast at boot.
-    let _ = load_registry(&config.device_registry)?;
+    let _ = load_effective_registry(&config.root, &config.device_registry)?;
     let signing_key = SigningKey::from_pkcs8_pem(&fs::read_to_string(&config.signing_key_path)?)?;
     let jobs = load_jobs(&config.root)?;
     let rollouts = load_rollouts(&config.root)?;
@@ -323,22 +459,38 @@ pub fn build_router(config: Config) -> Result<Router> {
         config,
         expected_token_hash,
         signing_key: Arc::new(signing_key),
+        devices_lock: Arc::new(Mutex::new(())),
+        releases_lock: Arc::new(Mutex::new(())),
         jobs: Arc::new(Mutex::new(jobs)),
         rollouts: Arc::new(Mutex::new(rollouts)),
     };
     let protected = Router::new()
         .route(
+            "/v1/releases",
+            post(register_release).get(list_all_releases),
+        )
+        .route("/v1/releases/bundle", post(create_bundle_release))
+        .route(
             "/v1/apps/android/releases",
             post(publish_android_app_release),
         )
+        .route("/v1/devices", get(list_devices))
         .route("/v1/devices/status", get(list_device_statuses))
+        .route(
+            "/v1/devices/{device_id}",
+            put(upsert_device).delete(delete_device),
+        )
         .route("/v1/devices/{device_id}/status", get(read_device_status))
         .route(
             "/v1/agent/devices/{device_id}/status",
             post(agent_report_device_status),
         )
+        .route("/v1/jobs", get(list_jobs))
         .route("/v1/devices/{device_id}/firmware/releases", get(releases))
-        .route("/v1/devices/{device_id}/firmware/jobs", post(start_job))
+        .route(
+            "/v1/devices/{device_id}/firmware/jobs",
+            post(start_job).get(list_device_jobs),
+        )
         .route(
             "/v1/devices/{device_id}/firmware/jobs/{job_id}",
             get(read_job),
@@ -376,6 +528,7 @@ pub fn build_router(config: Config) -> Result<Router> {
     Ok(Router::new()
         .route("/health", get(health))
         .route("/v1/apps/android/latest", get(android_app_latest))
+        .route("/v1/apps/android/download", get(android_app_download))
         .merge(protected)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn(security_headers))
@@ -483,9 +636,26 @@ async fn android_app_latest(
         Ok(None) => return error_response(StatusCode::NOT_FOUND, "app_release_not_found"),
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     };
-    let download_url = match oss_signed_url(&state.config, &release.object_key, now_ms() / 1000) {
-        Ok(url) => url,
-        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    let download_url = if let Some(base) = state
+        .config
+        .app_download_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let base = base.trim_end_matches('/');
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("channel", &release.channel)
+            .append_pair("version_code", &release.version_code.to_string())
+            .finish();
+        format!("{base}/v1/apps/android/download?{query}")
+    } else {
+        match oss_signed_url(&state.config, &release.object_key, now_ms() / 1000) {
+            Ok(url) => url,
+            Err(error) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        }
     };
     let update_available = release.version_code > query.version_code;
     let force_update =
@@ -508,6 +678,92 @@ async fn android_app_latest(
         }),
     )
         .into_response()
+}
+
+fn safe_apk_filename(version_name: &str, version_code: u64) -> String {
+    let sanitized: String = version_name
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect();
+    let ver = if sanitized.is_empty() {
+        "latest"
+    } else {
+        &sanitized
+    };
+    format!("doso-{ver}-vc{version_code}.apk")
+}
+
+async fn android_app_download(
+    method: Method,
+    State(state): State<AppState>,
+    Query(query): Query<AndroidAppDownloadQuery>,
+) -> Response {
+    let channel = match validate_channel(&query.channel) {
+        Ok(c) => c.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let release = match load_android_app_release(&state.config.root, &channel) {
+        Ok(Some(rel)) => rel,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "app_release_not_found"),
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    if query
+        .version_code
+        .is_some_and(|vc| vc != release.version_code)
+    {
+        return error_response(StatusCode::NOT_FOUND, "app_release_not_found");
+    }
+    if let Some(prefix) = state
+        .config
+        .app_download_accel_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let sign_method = if method == Method::HEAD {
+            "HEAD"
+        } else {
+            "GET"
+        };
+        let signed_query = match oss_signed_query(
+            &state.config,
+            sign_method,
+            &release.object_key,
+            now_ms() / 1000,
+        ) {
+            Ok(q) => q,
+            Err(error) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        };
+        let accel = format!(
+            "{}/{}?{signed_query}",
+            prefix.trim_end_matches('/'),
+            release.object_key.trim_start_matches('/')
+        );
+        let filename = safe_apk_filename(&release.version_name, release.version_code);
+        let disposition = format!("attachment; filename=\"{filename}\"");
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("X-Accel-Redirect", accel)
+            .header(
+                header::CONTENT_TYPE,
+                "application/vnd.android.package-archive",
+            )
+            .header(header::CONTENT_DISPOSITION, disposition)
+            .body(axum::body::Body::empty())
+            .unwrap_or_else(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()));
+    }
+    let download_url = match oss_signed_url(&state.config, &release.object_key, now_ms() / 1000) {
+        Ok(url) => url,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    Response::builder()
+        .status(StatusCode::TEMPORARY_REDIRECT)
+        .header(header::LOCATION, download_url)
+        .body(axum::body::Body::empty())
+        .unwrap_or_else(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
 }
 
 async fn publish_android_app_release(
@@ -587,7 +843,7 @@ async fn agent_report_device_status(
         Ok(id) => id.to_string(),
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
     };
-    match lookup_enabled_device(&state.config.device_registry, &clean_id) {
+    match lookup_enabled_device(&state.config.root, &state.config.device_registry, &clean_id) {
         Ok(Some(_)) => {}
         Ok(None) => return error_response(StatusCode::NOT_FOUND, "device_not_found"),
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
@@ -656,16 +912,445 @@ async fn list_device_statuses(State(state): State<AppState>) -> Response {
     (StatusCode::OK, Json(items)).into_response()
 }
 
+fn summary_from_manifest(manifest: &Manifest) -> ReleaseSummary {
+    ReleaseSummary {
+        release_id: manifest.release_id.clone(),
+        version: manifest.version.clone(),
+        sequence: manifest.sequence,
+        channel: manifest.channel.clone(),
+        model: manifest.model.clone(),
+        hardware_revision: manifest.hardware_revision.clone(),
+        artifact_size_bytes: manifest.artifact_size_bytes,
+        artifact_sha256: manifest.artifact_sha256.clone(),
+        artifact_type: manifest.artifact_type,
+        policy_slot: manifest.policy_slot.clone(),
+        component: manifest.component.clone(),
+    }
+}
+
+fn is_hex64(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn validate_oss_object_key(raw: &str) -> Result<String> {
+    let key = raw.trim().trim_start_matches('/');
+    ensure!(
+        !key.is_empty()
+            && key.len() <= 512
+            && !key.contains("..")
+            && !key.contains('?')
+            && !key.contains('#')
+            && !key.contains('\\')
+            && !key.chars().any(|c| c.is_control()),
+        "oss_object_key_invalid"
+    );
+    Ok(key.to_string())
+}
+
+fn validate_and_normalize_release_template(
+    mut template: ReleaseTemplate,
+    config: &Config,
+) -> Result<ReleaseTemplate> {
+    let clean_id = validate_release_id(&template.manifest.release_id)?.to_string();
+    template.manifest.release_id = clean_id;
+
+    ensure!(
+        template.manifest.manifest_version == 1,
+        "manifest_version_unsupported"
+    );
+    ensure!(
+        matches!(template.manifest.channel.as_str(), "dev" | "qa" | "stable"),
+        "release_channel_invalid"
+    );
+    ensure!(template.manifest.sequence > 0, "release_sequence_invalid");
+    ensure!(
+        !template.manifest.version.trim().is_empty()
+            && !template.manifest.model.trim().is_empty()
+            && !template.manifest.hardware_revision.trim().is_empty()
+            && !template
+                .manifest
+                .minimum_bootloader_version
+                .trim()
+                .is_empty()
+            && !template
+                .manifest
+                .minimum_brainstem_version
+                .trim()
+                .is_empty(),
+        "release_metadata_invalid"
+    );
+    ensure!(
+        template.manifest.rollback_policy.mode == "automatic"
+            && template.manifest.rollback_policy.health_timeout_ms > 0,
+        "rollback_policy_invalid"
+    );
+    if template.manifest.key_id.trim().is_empty() {
+        template.manifest.key_id = config.signing_key_id.clone();
+    }
+
+    match template.manifest.artifact_type {
+        ArtifactType::ReleaseBundle => {
+            ensure!(
+                !template.manifest.bundle_items.is_empty(),
+                "bundle_items_empty"
+            );
+            template.object_key.clear();
+            let mut normalized_keys = BTreeMap::new();
+            for (k, v) in &template.bundle_object_keys {
+                normalized_keys.insert(k.trim().to_string(), validate_oss_object_key(v)?);
+            }
+            for item in &mut template.manifest.bundle_items {
+                ensure!(
+                    !item.component.trim().is_empty()
+                        && item.component.trim() != "ota"
+                        && !item.version.trim().is_empty()
+                        && item.artifact_size_bytes > 0
+                        && is_hex64(&item.artifact_sha256),
+                    "bundle_item_invalid"
+                );
+                item.artifact_sha256 = item.artifact_sha256.to_ascii_lowercase();
+                let key = normalized_keys
+                    .get(&item.component)
+                    .context("bundle_object_key_missing")?;
+                let _ = oss_signed_url(config, key, 1_700_000_000)?;
+                if item.delta.is_some() {
+                    let delta_key = normalized_keys
+                        .get(&format!("{}:delta", item.component))
+                        .context("bundle_delta_object_key_missing")?;
+                    let _ = oss_signed_url(config, delta_key, 1_700_000_000)?;
+                }
+            }
+            template.bundle_object_keys = normalized_keys;
+        }
+        ArtifactType::BrainstemRelease
+        | ArtifactType::PolicyPackage
+        | ArtifactType::ComponentRelease => {
+            let key = validate_oss_object_key(&template.object_key)?;
+            let _ = oss_signed_url(config, &key, 1_700_000_000)?;
+            template.object_key = key;
+            ensure!(
+                template.manifest.artifact_size_bytes > 0
+                    && is_hex64(&template.manifest.artifact_sha256),
+                "release_artifact_invalid"
+            );
+            template.manifest.artifact_sha256 =
+                template.manifest.artifact_sha256.to_ascii_lowercase();
+            if template.manifest.artifact_type == ArtifactType::PolicyPackage {
+                ensure!(
+                    template
+                        .manifest
+                        .policy_slot
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty()),
+                    "policy_slot_missing"
+                );
+            }
+            if template.manifest.artifact_type == ArtifactType::ComponentRelease {
+                ensure!(
+                    template
+                        .manifest
+                        .component
+                        .as_deref()
+                        .is_some_and(|c| !c.trim().is_empty() && c.trim() != "ota"),
+                    "component_invalid"
+                );
+            }
+        }
+    }
+
+    if let Some(delta_key) = template.delta_object_key.take() {
+        let trimmed = delta_key.trim();
+        if !trimmed.is_empty() {
+            let normalized = validate_oss_object_key(trimmed)?;
+            let _ = oss_signed_url(config, &normalized, 1_700_000_000)?;
+            template.delta_object_key = Some(normalized);
+        }
+    }
+
+    Ok(template)
+}
+
+async fn register_release(
+    State(state): State<AppState>,
+    Json(request): Json<ReleaseTemplate>,
+) -> Response {
+    let normalized = match validate_and_normalize_release_template(request, &state.config) {
+        Ok(tpl) => tpl,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let release_id = normalized.manifest.release_id.clone();
+    let template_path = state
+        .config
+        .root
+        .join("releases")
+        .join(&release_id)
+        .join("manifest.template.json");
+
+    let _guard = state.releases_lock.lock().await;
+    if template_path.is_file() {
+        match fs::read(&template_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ReleaseTemplate>(&bytes).ok())
+        {
+            Some(existing)
+                if serde_json::to_value(&existing).ok()
+                    == serde_json::to_value(&normalized).ok() =>
+            {
+                return (
+                    StatusCode::OK,
+                    Json(summary_from_manifest(&existing.manifest)),
+                )
+                    .into_response();
+            }
+            _ => return error_response(StatusCode::CONFLICT, "release_already_exists"),
+        }
+    }
+    if let Err(error) = atomic_write_json(&template_path, &normalized) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    (
+        StatusCode::CREATED,
+        Json(summary_from_manifest(&normalized.manifest)),
+    )
+        .into_response()
+}
+
+async fn list_devices(State(state): State<AppState>) -> Response {
+    let registry = match load_effective_registry(&state.config.root, &state.config.device_registry)
+    {
+        Ok(reg) => reg,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    let mut items: Vec<DeviceEntry> = registry
+        .into_iter()
+        .map(|(device_id, rec)| DeviceEntry {
+            device_id,
+            model: rec.model,
+            hardware_revision: rec.hardware_revision,
+            enabled: rec.enabled,
+            ring: rec.ring,
+            tags: rec.tags,
+        })
+        .collect();
+    items.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+    (StatusCode::OK, Json(items)).into_response()
+}
+
+async fn upsert_device(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Json(req): Json<UpsertDeviceRequest>,
+) -> Response {
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let model = req.model.trim().to_string();
+    let hardware_revision = req.hardware_revision.trim().to_string();
+    let ring = req.ring.trim().to_string();
+    if model.is_empty() || hardware_revision.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "device_metadata_invalid");
+    }
+    if !matches!(ring.as_str(), "dev" | "canary" | "prod") {
+        return error_response(StatusCode::BAD_REQUEST, "device_ring_invalid");
+    }
+    let mut seen_tags = BTreeSet::new();
+    let mut tags = Vec::new();
+    for raw_tag in req.tags {
+        let t = raw_tag.trim().to_string();
+        if !t.is_empty() && seen_tags.insert(t.clone()) {
+            tags.push(t);
+        }
+    }
+    let record = DeviceRecord {
+        model: model.clone(),
+        hardware_revision: hardware_revision.clone(),
+        enabled: req.enabled,
+        ring: ring.clone(),
+        tags: tags.clone(),
+    };
+
+    let _guard = state.devices_lock.lock().await;
+    let mut overlay = match load_registry_overlay(&state.config.root) {
+        Ok(o) => o,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    overlay.deleted.remove(&clean_id);
+    overlay.upserts.insert(clean_id.clone(), record);
+    if let Err(error) = persist_registry_overlay(&state.config.root, &overlay) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    (
+        StatusCode::OK,
+        Json(DeviceEntry {
+            device_id: clean_id,
+            model,
+            hardware_revision,
+            enabled: req.enabled,
+            ring,
+            tags,
+        }),
+    )
+        .into_response()
+}
+
+async fn delete_device(State(state): State<AppState>, Path(device_id): Path<String>) -> Response {
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let _guard = state.devices_lock.lock().await;
+    let existing = match load_effective_registry(&state.config.root, &state.config.device_registry)
+    {
+        Ok(reg) => reg,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    if !existing.contains_key(&clean_id) {
+        return error_response(StatusCode::NOT_FOUND, "device_not_found");
+    }
+    let mut overlay = match load_registry_overlay(&state.config.root) {
+        Ok(o) => o,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    overlay.upserts.remove(&clean_id);
+    overlay.deleted.insert(clean_id.clone());
+    if let Err(error) = persist_registry_overlay(&state.config.root, &overlay) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "deleted": true, "deviceId": clean_id })),
+    )
+        .into_response()
+}
+
+async fn create_bundle_release(
+    State(state): State<AppState>,
+    Json(req): Json<CreateBundleRequest>,
+) -> Response {
+    if req.source_release_ids.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "bundle_source_releases_empty");
+    }
+    let mut bundle_items = Vec::new();
+    let mut bundle_object_keys = BTreeMap::new();
+    let mut seen_components = BTreeSet::new();
+    let mut model = String::new();
+    let mut hardware_revision = String::new();
+
+    for raw_id in &req.source_release_ids {
+        let src_template = match load_release_template(&state.config.root, raw_id) {
+            Ok(tpl) => tpl,
+            Err(_) => return error_response(StatusCode::NOT_FOUND, "source_release_not_found"),
+        };
+        let comp = match src_template.manifest.artifact_type {
+            ArtifactType::BrainstemRelease => "brainstem".to_string(),
+            ArtifactType::ComponentRelease => {
+                match src_template.manifest.component.as_deref().map(str::trim) {
+                    Some(c) if !c.is_empty() && c != "ota" => c.to_string(),
+                    _ => {
+                        return error_response(StatusCode::BAD_REQUEST, "bundle_component_invalid");
+                    }
+                }
+            }
+            ArtifactType::PolicyPackage | ArtifactType::ReleaseBundle => {
+                return error_response(StatusCode::BAD_REQUEST, "bundle_source_type_unsupported");
+            }
+        };
+        if !seen_components.insert(comp.clone()) {
+            return error_response(StatusCode::BAD_REQUEST, "bundle_duplicate_component");
+        }
+        if model.is_empty() {
+            model = src_template.manifest.model.clone();
+            hardware_revision = src_template.manifest.hardware_revision.clone();
+        } else if src_template.manifest.model != model {
+            return error_response(StatusCode::CONFLICT, "bundle_source_incompatible");
+        } else if doso_ota::is_universal_hardware_revision(&hardware_revision) {
+            hardware_revision = src_template.manifest.hardware_revision.clone();
+        } else if !doso_ota::hardware_revision_matches(
+            &src_template.manifest.hardware_revision,
+            &hardware_revision,
+        ) {
+            return error_response(StatusCode::CONFLICT, "bundle_source_incompatible");
+        }
+        if src_template.object_key.trim().is_empty() {
+            return error_response(StatusCode::BAD_REQUEST, "bundle_object_key_missing");
+        }
+        bundle_object_keys.insert(comp.clone(), src_template.object_key.clone());
+        bundle_items.push(BundleItem {
+            component: comp,
+            version: src_template.manifest.version,
+            artifact_url: "https://placeholder.invalid/signed-at-dispatch".into(),
+            artifact_size_bytes: src_template.manifest.artifact_size_bytes,
+            artifact_sha256: src_template.manifest.artifact_sha256,
+            systemd_unit: src_template.manifest.systemd_unit,
+            health_url: src_template.manifest.health_url,
+            requires: src_template.manifest.requires,
+            delta: None,
+        });
+    }
+
+    let manifest = Manifest {
+        manifest_version: 1,
+        release_id: req.release_id,
+        channel: req.channel,
+        sequence: req.sequence,
+        version: req.version,
+        issued_at_ms: 0,
+        expires_at_ms: (req.manifest_ttl_seconds as i64).saturating_mul(1000),
+        model,
+        hardware_revision,
+        minimum_bootloader_version: req.minimum_bootloader_version,
+        minimum_brainstem_version: req.minimum_brainstem_version,
+        minimum_battery_percent: req.minimum_battery_percent,
+        artifact_url: String::new(),
+        artifact_size_bytes: 0,
+        artifact_sha256: String::new(),
+        key_id: state.config.signing_key_id.clone(),
+        rollback_policy: RollbackPolicy {
+            mode: "automatic".into(),
+            health_timeout_ms: req.health_timeout_ms,
+        },
+        artifact_type: ArtifactType::ReleaseBundle,
+        policy_slot: None,
+        shadow_frames: None,
+        activate: None,
+        component: None,
+        systemd_unit: None,
+        health_url: None,
+        requires: BTreeMap::new(),
+        bundle_items,
+        delta: None,
+    };
+
+    let template = ReleaseTemplate {
+        manifest,
+        object_key: String::new(),
+        bundle_object_keys,
+        delta_object_key: None,
+    };
+    register_release(State(state), Json(template)).await
+}
+
+async fn list_all_releases(State(state): State<AppState>) -> Response {
+    match load_all_releases(&state.config.root) {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
 async fn releases(State(state): State<AppState>, Path(device_id): Path<String>) -> Response {
     let clean_id = match validate_device_id(&device_id) {
         Ok(id) => id.to_string(),
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
     };
-    let device = match lookup_enabled_device(&state.config.device_registry, &clean_id) {
-        Ok(Some(device)) => device,
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "device_not_found"),
-        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
-    };
+    let device =
+        match lookup_enabled_device(&state.config.root, &state.config.device_registry, &clean_id) {
+            Ok(Some(device)) => device,
+            Ok(None) => return error_response(StatusCode::NOT_FOUND, "device_not_found"),
+            Err(error) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        };
     match load_releases(&state.config.root, &device) {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
@@ -681,11 +1366,14 @@ async fn start_job(
         Ok(id) => id.to_string(),
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
     };
-    let device = match lookup_enabled_device(&state.config.device_registry, &clean_id) {
-        Ok(Some(device)) => device,
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "device_not_found"),
-        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
-    };
+    let device =
+        match lookup_enabled_device(&state.config.root, &state.config.device_registry, &clean_id) {
+            Ok(Some(device)) => device,
+            Ok(None) => return error_response(StatusCode::NOT_FOUND, "device_not_found"),
+            Err(error) => {
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+            }
+        };
     if let Err(error) = ensure_request(&request) {
         return error_response(StatusCode::BAD_REQUEST, &error.to_string());
     }
@@ -712,12 +1400,21 @@ async fn start_job(
         Err(error) => return error_response(StatusCode::NOT_FOUND, &error.to_string()),
     };
     if template.manifest.model != device.model
-        || template.manifest.hardware_revision != device.hardware_revision
+        || !doso_ota::hardware_revision_matches(
+            &template.manifest.hardware_revision,
+            &device.hardware_revision,
+        )
     {
         return error_response(StatusCode::CONFLICT, "release_incompatible");
     }
     let now = now_ms();
-    let envelope = match build_signed_envelope(&state.config, &state.signing_key, template, now) {
+    let envelope = match build_signed_envelope(
+        &state.config,
+        &state.signing_key,
+        template,
+        now,
+        Some(&device.hardware_revision),
+    ) {
         Ok(envelope) => envelope,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     };
@@ -740,6 +1437,66 @@ async fn start_job(
     }
     jobs.insert(job.job_id.clone(), job.clone());
     (StatusCode::ACCEPTED, Json(job)).into_response()
+}
+
+async fn list_jobs(State(state): State<AppState>, Query(query): Query<ListJobsQuery>) -> Response {
+    let filter_device = match query
+        .device_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => match validate_device_id(raw) {
+            Ok(id) => Some(id.to_string()),
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        },
+        None => None,
+    };
+    let limit = query.limit.unwrap_or(150).clamp(1, 500);
+    let jobs = state.jobs.lock().await;
+    let mut items: Vec<JobSummary> = jobs
+        .values()
+        .filter(|job| {
+            filter_device
+                .as_deref()
+                .is_none_or(|dev| job.device_id == dev)
+        })
+        .map(JobSummary::from)
+        .collect();
+    items.sort_by(|a, b| {
+        b.updated_at_ms
+            .max(b.created_at_ms)
+            .cmp(&a.updated_at_ms.max(a.created_at_ms))
+            .then_with(|| b.created_at_ms.cmp(&a.created_at_ms))
+    });
+    items.truncate(limit);
+    (StatusCode::OK, Json(items)).into_response()
+}
+
+async fn list_device_jobs(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Query(query): Query<ListJobsQuery>,
+) -> Response {
+    let clean_id = match validate_device_id(&device_id) {
+        Ok(id) => id.to_string(),
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let jobs = state.jobs.lock().await;
+    let mut items: Vec<JobSummary> = jobs
+        .values()
+        .filter(|job| job.device_id == clean_id)
+        .map(JobSummary::from)
+        .collect();
+    items.sort_by(|a, b| {
+        b.updated_at_ms
+            .max(b.created_at_ms)
+            .cmp(&a.updated_at_ms.max(a.created_at_ms))
+            .then_with(|| b.created_at_ms.cmp(&a.created_at_ms))
+    });
+    items.truncate(limit);
+    (StatusCode::OK, Json(items)).into_response()
 }
 
 async fn read_job(
@@ -811,7 +1568,8 @@ async fn agent_next_job(State(state): State<AppState>, Path(device_id): Path<Str
         Ok(id) => id.to_string(),
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
     };
-    let registry = match load_registry(&state.config.device_registry) {
+    let registry = match load_effective_registry(&state.config.root, &state.config.device_registry)
+    {
         Ok(reg) => reg,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     };
@@ -836,7 +1594,13 @@ async fn agent_next_job(State(state): State<AppState>, Path(device_id): Path<Str
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
             }
         };
-        match build_signed_envelope(&state.config, &state.signing_key, template, now) {
+        match build_signed_envelope(
+            &state.config,
+            &state.signing_key,
+            template,
+            now,
+            Some(&device.hardware_revision),
+        ) {
             Ok(envelope) => {
                 job.manifest = envelope;
                 job.updated_at_ms = now;
@@ -885,12 +1649,20 @@ async fn agent_next_job(State(state): State<AppState>, Path(device_id): Path<Str
             Err(_) => continue,
         };
         if template.manifest.model != device.model
-            || template.manifest.hardware_revision != device.hardware_revision
+            || !doso_ota::hardware_revision_matches(
+                &template.manifest.hardware_revision,
+                &device.hardware_revision,
+            )
         {
             continue;
         }
-        let envelope = match build_signed_envelope(&state.config, &state.signing_key, template, now)
-        {
+        let envelope = match build_signed_envelope(
+            &state.config,
+            &state.signing_key,
+            template,
+            now,
+            Some(&device.hardware_revision),
+        ) {
             Ok(env) => env,
             Err(error) => {
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
@@ -953,7 +1725,8 @@ async fn agent_report_job(
         Ok(id) => id.to_string(),
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
     };
-    let registry = match load_registry(&state.config.device_registry) {
+    let registry = match load_effective_registry(&state.config.root, &state.config.device_registry)
+    {
         Ok(reg) => reg,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     };
@@ -1037,12 +1810,15 @@ async fn create_rollout(
     if target_model != template.manifest.model {
         return error_response(StatusCode::CONFLICT, "rollout_model_mismatch");
     }
-    let target_hardware_revision = req
-        .target_hardware_revision
-        .clone()
-        .or_else(|| Some(template.manifest.hardware_revision.clone()));
+    let target_hardware_revision = req.target_hardware_revision.clone().or_else(|| {
+        if doso_ota::is_universal_hardware_revision(&template.manifest.hardware_revision) {
+            None
+        } else {
+            Some(template.manifest.hardware_revision.clone())
+        }
+    });
     if let Some(ref hw) = target_hardware_revision
-        && hw != &template.manifest.hardware_revision
+        && !doso_ota::hardware_revision_matches(&template.manifest.hardware_revision, hw)
     {
         return error_response(StatusCode::CONFLICT, "rollout_hardware_mismatch");
     }
@@ -1081,7 +1857,8 @@ async fn create_rollout(
 }
 
 async fn list_rollouts(State(state): State<AppState>) -> Response {
-    let registry = match load_registry(&state.config.device_registry) {
+    let registry = match load_effective_registry(&state.config.root, &state.config.device_registry)
+    {
         Ok(reg) => reg,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     };
@@ -1108,7 +1885,8 @@ async fn get_rollout(State(state): State<AppState>, Path(rollout_id): Path<Strin
         Ok(id) => id.to_string(),
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
     };
-    let registry = match load_registry(&state.config.device_registry) {
+    let registry = match load_effective_registry(&state.config.root, &state.config.device_registry)
+    {
         Ok(reg) => reg,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     };
@@ -1261,6 +2039,23 @@ fn is_valid_agent_phase(phase: &str) -> bool {
     )
 }
 
+fn registry_overlay_path(root: &FsPath) -> PathBuf {
+    root.join("devices.override.json")
+}
+
+fn load_registry_overlay(root: &FsPath) -> Result<DeviceRegistryOverlay> {
+    let path = registry_overlay_path(root);
+    if !path.is_file() {
+        return Ok(DeviceRegistryOverlay::default());
+    }
+    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+}
+
+fn persist_registry_overlay(root: &FsPath, overlay: &DeviceRegistryOverlay) -> Result<()> {
+    atomic_write_json(&registry_overlay_path(root), overlay)
+}
+
 fn load_registry(path: &FsPath) -> Result<HashMap<String, DeviceRecord>> {
     let bytes =
         fs::read(path).with_context(|| format!("read device registry {}", path.display()))?;
@@ -1268,8 +2063,27 @@ fn load_registry(path: &FsPath) -> Result<HashMap<String, DeviceRecord>> {
         .with_context(|| format!("parse device registry {}", path.display()))
 }
 
-fn lookup_enabled_device(path: &FsPath, device_id: &str) -> Result<Option<DeviceRecord>> {
-    let registry = load_registry(path)?;
+fn load_effective_registry(
+    root: &FsPath,
+    static_path: &FsPath,
+) -> Result<HashMap<String, DeviceRecord>> {
+    let mut registry = load_registry(static_path)?;
+    let overlay = load_registry_overlay(root)?;
+    for deleted_id in overlay.deleted {
+        registry.remove(&deleted_id);
+    }
+    for (id, rec) in overlay.upserts {
+        registry.insert(id, rec);
+    }
+    Ok(registry)
+}
+
+fn lookup_enabled_device(
+    root: &FsPath,
+    static_path: &FsPath,
+    device_id: &str,
+) -> Result<Option<DeviceRecord>> {
+    let registry = load_effective_registry(root, static_path)?;
     Ok(registry.get(device_id).filter(|d| d.enabled).cloned())
 }
 
@@ -1303,7 +2117,15 @@ fn build_signed_envelope(
     signing_key: &SigningKey,
     mut template: ReleaseTemplate,
     now_ms: i64,
+    device_hardware_revision: Option<&str>,
 ) -> Result<ManifestEnvelope> {
+    if let Some(dev_hw) = device_hardware_revision
+        && doso_ota::is_universal_hardware_revision(&template.manifest.hardware_revision)
+    {
+        // Rewrite universal ARM64 templates to the target device's concrete hardwareRevision
+        // before Ed25519 signing so legacy on-robot doso-ota binaries verify seamlessly.
+        template.manifest.hardware_revision = dev_hw.to_string();
+    }
     let default_ttl_ms = (config.signed_url_ttl_seconds.max(60) as i64).saturating_mul(1000);
     let template_ttl_ms = template
         .manifest
@@ -1315,7 +2137,7 @@ fn build_signed_envelope(
         default_ttl_ms
     };
     let now_secs = now_ms / 1000;
-    template.manifest.issued_at_ms = now_ms;
+    template.manifest.issued_at_ms = now_ms.saturating_sub(MANIFEST_CLOCK_SKEW_LEEWAY_MS);
     template.manifest.expires_at_ms = now_ms.saturating_add(ttl_ms);
     template.manifest.key_id = config.signing_key_id.clone();
 
@@ -1384,6 +2206,32 @@ async fn require_bearer_auth(
     }
 }
 
+fn load_all_releases(root: &FsPath) -> Result<Vec<ReleaseSummary>> {
+    let mut output = Vec::new();
+    let releases_dir = root.join("releases");
+    if !releases_dir.exists() {
+        return Ok(output);
+    }
+    for entry in fs::read_dir(releases_dir)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path().join("manifest.template.json");
+        if !path.is_file() {
+            continue;
+        }
+        let template: ReleaseTemplate = serde_json::from_slice(&fs::read(path)?)?;
+        output.push(summary_from_manifest(&template.manifest));
+    }
+    output.sort_by(|a, b| {
+        a.sequence
+            .cmp(&b.sequence)
+            .then_with(|| a.release_id.cmp(&b.release_id))
+    });
+    Ok(output)
+}
+
 fn load_releases(root: &FsPath, device: &DeviceRecord) -> Result<Vec<ReleaseSummary>> {
     let mut output = Vec::new();
     let releases_dir = root.join("releases");
@@ -1401,21 +2249,12 @@ fn load_releases(root: &FsPath, device: &DeviceRecord) -> Result<Vec<ReleaseSumm
         }
         let template: ReleaseTemplate = serde_json::from_slice(&fs::read(path)?)?;
         if template.manifest.model == device.model
-            && template.manifest.hardware_revision == device.hardware_revision
+            && doso_ota::hardware_revision_matches(
+                &template.manifest.hardware_revision,
+                &device.hardware_revision,
+            )
         {
-            output.push(ReleaseSummary {
-                release_id: template.manifest.release_id,
-                version: template.manifest.version,
-                sequence: template.manifest.sequence,
-                channel: template.manifest.channel,
-                model: template.manifest.model,
-                hardware_revision: template.manifest.hardware_revision,
-                artifact_size_bytes: template.manifest.artifact_size_bytes,
-                artifact_sha256: template.manifest.artifact_sha256,
-                artifact_type: template.manifest.artifact_type,
-                policy_slot: template.manifest.policy_slot,
-                component: template.manifest.component,
-            });
+            output.push(summary_from_manifest(&template.manifest));
         }
     }
     output.sort_by_key(|release| release.sequence);
@@ -1430,6 +2269,33 @@ fn sign_manifest(manifest: &Manifest, key: &SigningKey) -> Result<ManifestEnvelo
     })
 }
 
+fn oss_signed_query(
+    config: &Config,
+    method: &str,
+    object_key: &str,
+    now_secs: i64,
+) -> Result<String> {
+    let bucket = config.oss_bucket.trim();
+    let key = object_key.trim().trim_start_matches('/');
+    ensure!(!bucket.is_empty(), "oss_bucket_empty");
+    ensure!(
+        !key.is_empty() && !key.contains("..") && !key.contains('?') && !key.contains('#'),
+        "oss_object_key_invalid"
+    );
+    let expires = now_secs.saturating_add(config.signed_url_ttl_seconds as i64);
+    let resource = format!("/{bucket}/{key}");
+    let string_to_sign = format!("{method}\n\n\n{expires}\n{resource}");
+    let mut mac = HmacSha1::new_from_slice(config.oss_access_key_secret.as_bytes())
+        .map_err(|_| anyhow::anyhow!("oss_secret_invalid"))?;
+    mac.update(string_to_sign.as_bytes());
+    let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    Ok(form_urlencoded::Serializer::new(String::new())
+        .append_pair("OSSAccessKeyId", &config.oss_access_key_id)
+        .append_pair("Expires", &expires.to_string())
+        .append_pair("Signature", &signature)
+        .finish())
+}
+
 /// Signs an Aliyun OSS GET URL using Unix timestamp in **seconds**.
 pub fn oss_signed_url(config: &Config, object_key: &str, now_secs: i64) -> Result<String> {
     let bucket = config.oss_bucket.trim();
@@ -1440,24 +2306,8 @@ pub fn oss_signed_url(config: &Config, object_key: &str, now_secs: i64) -> Resul
         .trim_start_matches("http://")
         .trim_end_matches('/');
     let key = object_key.trim().trim_start_matches('/');
-    ensure!(!bucket.is_empty(), "oss_bucket_empty");
     ensure!(!endpoint.is_empty(), "oss_endpoint_empty");
-    ensure!(
-        !key.is_empty() && !key.contains("..") && !key.contains('?') && !key.contains('#'),
-        "oss_object_key_invalid"
-    );
-    let expires = now_secs.saturating_add(config.signed_url_ttl_seconds as i64);
-    let resource = format!("/{bucket}/{key}");
-    let string_to_sign = format!("GET\n\n\n{expires}\n{resource}");
-    let mut mac = HmacSha1::new_from_slice(config.oss_access_key_secret.as_bytes())
-        .map_err(|_| anyhow::anyhow!("oss_secret_invalid"))?;
-    mac.update(string_to_sign.as_bytes());
-    let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-    let query = form_urlencoded::Serializer::new(String::new())
-        .append_pair("OSSAccessKeyId", &config.oss_access_key_id)
-        .append_pair("Expires", &expires.to_string())
-        .append_pair("Signature", &signature)
-        .finish();
+    let query = oss_signed_query(config, "GET", key, now_secs)?;
     Ok(format!("https://{bucket}.{endpoint}/{key}?{query}"))
 }
 
@@ -1571,6 +2421,8 @@ mod tests {
             oss_access_key_id: "ak-test".into(),
             oss_access_key_secret: "sk-secret-value".into(),
             signed_url_ttl_seconds: 1800,
+            app_download_base_url: None,
+            app_download_accel_prefix: None,
         };
         (config, key)
     }
@@ -1614,6 +2466,8 @@ mod tests {
             oss_access_key_id: "ak".into(),
             oss_access_key_secret: "secret".into(),
             signed_url_ttl_seconds: 600,
+            app_download_base_url: None,
+            app_download_accel_prefix: None,
         };
         let url = oss_signed_url(&config, "firmware/qa/a.bundle", 1_700_000_000).unwrap();
         assert!(
@@ -1688,9 +2542,15 @@ mod tests {
         let job: Job = serde_json::from_slice(&body).unwrap();
         let manifest = job.manifest.decode(&key.verifying_key()).unwrap();
 
-        // Bug 2: manifest issuedAtMs/expiresAtMs refreshed dynamically preserving 600_000ms TTL.
-        assert!(manifest.issued_at_ms >= before_ms && manifest.issued_at_ms <= after_ms);
-        assert_eq!(manifest.expires_at_ms - manifest.issued_at_ms, 600_000);
+        // Bug 2: manifest issuedAtMs/expiresAtMs refreshed dynamically with clock-skew leeway.
+        assert!(
+            manifest.issued_at_ms >= before_ms - MANIFEST_CLOCK_SKEW_LEEWAY_MS
+                && manifest.issued_at_ms <= after_ms - MANIFEST_CLOCK_SKEW_LEEWAY_MS
+        );
+        assert!(
+            manifest.expires_at_ms >= before_ms + 600_000
+                && manifest.expires_at_ms <= after_ms + 600_000
+        );
         assert_eq!(manifest.key_id, "release-key-2026-01");
 
         // Bug 1: OSS URL Expires must be ~10-digit Unix seconds (now_sec + 1800), never milliseconds!
@@ -3168,6 +4028,7 @@ mod tests {
         let app = build_router(config).unwrap();
 
         let post_paths = [
+            "/v1/releases",
             "/v1/rollouts",
             "/v1/devices/dev-1/firmware/jobs",
             "/v1/apps/android/releases",
@@ -3238,5 +4099,765 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r_android.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn register_release_persists_lists_dispatches_and_enforces_immutability() {
+        let dir = TestDir::new();
+        let (config, key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "dev-1": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true }
+            }),
+            base_template_manifest("rel-seed", 0, 0),
+            "firmware/qa/rel-seed/brainstem.tar.gz",
+            "rel-seed",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        let body_json = serde_json::json!({
+            "manifest": base_template_manifest("rel-http-004", 0, 1_800_000),
+            "objectKey": "/firmware/qa/rel-http-004/brainstem.tar.gz"
+        });
+
+        // 1. Register new release -> 201 Created.
+        let r_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body_json).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_create.status(), StatusCode::CREATED);
+        let created: ReleaseSummary = serde_json::from_slice(
+            &axum::body::to_bytes(r_create.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(created.release_id, "rel-http-004");
+        assert_eq!(created.sequence, 7);
+
+        // 2. Idempotent retry with identical payload -> 200 OK.
+        let r_retry = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body_json).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_retry.status(), StatusCode::OK);
+
+        // 3. Mutating an existing releaseId -> 409 Conflict (immutability).
+        let mut tampered = body_json.clone();
+        tampered["manifest"]["artifactSha256"] =
+            serde_json::json!(Manifest::artifact_hash(b"different-bytes"));
+        let r_conflict = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&tampered).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_conflict.status(), StatusCode::CONFLICT);
+
+        // 4. Listed by GET /v1/releases and immediately dispatchable to dev-1.
+        let r_list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_list.status(), StatusCode::OK);
+        let all: Vec<ReleaseSummary> = serde_json::from_slice(
+            &axum::body::to_bytes(r_list.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(all.iter().any(|r| r.release_id == "rel-http-004"));
+
+        let r_job = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/devices/dev-1/firmware/jobs")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "releaseId": "rel-http-004",
+                            "idempotencyKey": "idem-http-004"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_job.status(), StatusCode::ACCEPTED);
+        let job: Job = serde_json::from_slice(
+            &axum::body::to_bytes(r_job.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let decoded = job.manifest.decode(&key.verifying_key()).unwrap();
+        assert_eq!(decoded.release_id, "rel-http-004");
+        assert!(
+            decoded
+                .artifact_url
+                .contains("/firmware/qa/rel-http-004/brainstem.tar.gz?")
+        );
+    }
+
+    #[tokio::test]
+    async fn register_release_rejects_traversal_and_invalid_fields() {
+        let dir = TestDir::new();
+        let (config, _key) = write_test_env(
+            dir.path(),
+            serde_json::json!({}),
+            base_template_manifest("rel-seed", 0, 0),
+            "firmware/qa/rel-seed/brainstem.tar.gz",
+            "rel-seed",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        let bad_cases = vec![
+            serde_json::json!({
+                "manifest": base_template_manifest("../escape", 0, 0),
+                "objectKey": "firmware/qa/x/a.tar.gz"
+            }),
+            serde_json::json!({
+                "manifest": base_template_manifest("rel-bad-key", 0, 0),
+                "objectKey": "firmware/../../secret"
+            }),
+            serde_json::json!({
+                "manifest": {
+                    "manifestVersion": 1,
+                    "releaseId": "rel-bad-sha",
+                    "channel": "qa",
+                    "sequence": 1,
+                    "version": "0.0.4",
+                    "issuedAtMs": 0,
+                    "expiresAtMs": 0,
+                    "model": "THUNDER 01",
+                    "hardwareRevision": "rdk-s100p",
+                    "minimumBootloaderVersion": "1.0.0",
+                    "minimumBrainstemVersion": "1.0.0",
+                    "minimumBatteryPercent": 20,
+                    "artifactUrl": "",
+                    "artifactSizeBytes": 100,
+                    "artifactSha256": "not-a-sha",
+                    "keyId": "k",
+                    "rollbackPolicy": { "mode": "automatic", "healthTimeoutMs": 15000 }
+                },
+                "objectKey": "firmware/qa/rel-bad-sha/a.tar.gz"
+            }),
+        ];
+
+        for payload in bad_cases {
+            let r = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/releases")
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn devices_crud_overlay_persists_hot_updates_and_respects_delete() {
+        let dir = TestDir::new();
+        let (config, _key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "seed-dog": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "canary" }
+            }),
+            base_template_manifest("rel-seed", 0, 0),
+            "firmware/qa/rel-seed/brainstem.tar.gz",
+            "rel-seed",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        let r_put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/devices/new-dog-002")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "model": "THUNDER 01",
+                            "hardwareRevision": "rdk-s100p",
+                            "enabled": true,
+                            "ring": "prod",
+                            "tags": ["batch1", "batch1", "shanghai"]
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_put.status(), StatusCode::OK);
+
+        let r_list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_list.status(), StatusCode::OK);
+        let list: Vec<DeviceEntry> = serde_json::from_slice(
+            &axum::body::to_bytes(r_list.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(list.len(), 2);
+        let added = list.iter().find(|d| d.device_id == "new-dog-002").unwrap();
+        assert_eq!(added.ring, "prod");
+        assert_eq!(added.tags, vec!["batch1", "shanghai"]);
+
+        let r_del = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/devices/seed-dog")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_del.status(), StatusCode::OK);
+
+        let r_rel = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/seed-dog/firmware/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_rel.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_bundle_release_assembles_components_and_signs_for_dispatch() {
+        let dir = TestDir::new();
+        let (config, key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "dev-1": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true }
+            }),
+            base_template_manifest("rel-bs-1", 0, 0),
+            "firmware/qa/rel-bs-1/brainstem.tar.gz",
+            "rel-bs-1",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        let mut voice_m = base_template_manifest("rel-voice-1", 0, 0);
+        voice_m["artifactType"] = serde_json::json!("component_release");
+        voice_m["component"] = serde_json::json!("voice");
+        voice_m["version"] = serde_json::json!("0.5.0");
+        voice_m["sequence"] = serde_json::json!(8);
+        let r_reg = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "manifest": voice_m,
+                            "objectKey": "components/voice/qa/rel-voice-1/voice.tar.gz"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_reg.status(), StatusCode::CREATED);
+
+        let r_bundle = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/releases/bundle")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "releaseId": "bundle-1.0.0-stable",
+                            "version": "1.0.0",
+                            "sequence": 30,
+                            "channel": "stable",
+                            "sourceReleaseIds": ["rel-bs-1", "rel-voice-1"]
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_bundle.status(), StatusCode::CREATED);
+        let summary: ReleaseSummary = serde_json::from_slice(
+            &axum::body::to_bytes(r_bundle.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary.artifact_type, ArtifactType::ReleaseBundle);
+
+        let r_job = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/devices/dev-1/firmware/jobs")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "releaseId": "bundle-1.0.0-stable",
+                            "idempotencyKey": "idem-bundle-1"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r_job.status(), StatusCode::ACCEPTED);
+        let job: Job = serde_json::from_slice(
+            &axum::body::to_bytes(r_job.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let decoded = job.manifest.decode(&key.verifying_key()).unwrap();
+        assert_eq!(decoded.bundle_items.len(), 2);
+        assert!(decoded.bundle_items[0].artifact_url.contains("rel-bs-1"));
+        assert!(decoded.bundle_items[1].artifact_url.contains("rel-voice-1"));
+    }
+
+    #[tokio::test]
+    async fn android_apk_download_accel_proxy_supports_get_head_and_rejects_mismatch() {
+        let dir = TestDir::new();
+        let (mut config, _key) = write_test_env(
+            dir.path(),
+            serde_json::json!({}),
+            base_template_manifest("rel-unused", 0, 0),
+            "firmware/qa/rel-unused/a.tar.gz",
+            "rel-unused",
+        );
+        config.app_download_base_url = Some("https://api.dosorobotics.com/ota".into());
+        config.app_download_accel_prefix = Some("/_internal_oss_apk".into());
+        let get_q = oss_signed_query(
+            &config,
+            "GET",
+            "apps/android/qa/0.0.1/doso-0.0.1-vc1.apk",
+            1_700_000_000,
+        )
+        .unwrap();
+        let head_q = oss_signed_query(
+            &config,
+            "HEAD",
+            "apps/android/qa/0.0.1/doso-0.0.1-vc1.apk",
+            1_700_000_000,
+        )
+        .unwrap();
+        assert_ne!(get_q, head_q);
+
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        let publish = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/apps/android/releases")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "channel": "qa",
+                            "versionName": "0.0.1",
+                            "versionCode": 1,
+                            "minSupportedCode": 1,
+                            "changelog": "test",
+                            "apkSha256": "a".repeat(64),
+                            "apkSizeBytes": 1234,
+                            "objectKey": "apps/android/qa/0.0.1/doso-0.0.1-vc1.apk"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(publish.status(), StatusCode::OK);
+
+        let latest = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/apps/android/latest?channel=qa&version_code=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(latest.status(), StatusCode::OK);
+        let latest_body: AndroidAppLatestResponse = serde_json::from_slice(
+            &axum::body::to_bytes(latest.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            latest_body.download_url,
+            "https://api.dosorobotics.com/ota/v1/apps/android/download?channel=qa&version_code=1"
+        );
+
+        let get_dl = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/apps/android/download?channel=qa&version_code=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_dl.status(), StatusCode::OK);
+        let get_accel = get_dl
+            .headers()
+            .get("x-accel-redirect")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            get_accel.starts_with("/_internal_oss_apk/apps/android/qa/0.0.1/doso-0.0.1-vc1.apk?")
+        );
+        assert!(get_accel.contains("OSSAccessKeyId="));
+        assert_eq!(
+            get_dl.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/vnd.android.package-archive"
+        );
+        assert_eq!(
+            get_dl.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"doso-0.0.1-vc1.apk\""
+        );
+
+        let head_dl = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri("/v1/apps/android/download?channel=qa&version_code=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(head_dl.status(), StatusCode::OK);
+        let head_accel = head_dl
+            .headers()
+            .get("x-accel-redirect")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            head_accel.starts_with("/_internal_oss_apk/apps/android/qa/0.0.1/doso-0.0.1-vc1.apk?")
+        );
+        assert_ne!(head_accel, get_accel);
+
+        let mismatch = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/apps/android/download?channel=qa&version_code=999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatch.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_jobs_returns_persisted_jobs_sorted_and_filtered() {
+        let dir = TestDir::new();
+        let (config, _key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "dog-01": { "model": "THUNDER 01", "hardwareRevision": "rdk-s100p", "enabled": true, "ring": "canary" }
+            }),
+            base_template_manifest("rel-1", 0, 0),
+            "firmware/qa/rel-1/brainstem.tar.gz",
+            "rel-1",
+        );
+        let token = config.verify_api_token.clone();
+        let app = build_router(config).unwrap();
+
+        // Unauthenticated request must be rejected.
+        let unauth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/jobs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // Start a job on dog-01 and verify it appears in both /v1/jobs and /v1/devices/{id}/firmware/jobs.
+        let start = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/devices/dog-01/firmware/jobs")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"releaseId": "rel-1", "idempotencyKey": "list-test-1"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(start.status(), StatusCode::ACCEPTED);
+        let started: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(start.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let job_id = started["jobId"].as_str().unwrap().to_string();
+
+        let all = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/jobs?limit=10")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(all.status(), StatusCode::OK);
+        let list: Vec<serde_json::Value> =
+            serde_json::from_slice(&axum::body::to_bytes(all.into_body(), 65536).await.unwrap())
+                .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["jobId"], job_id);
+        assert!(list[0].get("manifest").is_none());
+
+        let per_dev = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/devices/dog-01/firmware/jobs")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(per_dev.status(), StatusCode::OK);
+        let dev_list: Vec<serde_json::Value> = serde_json::from_slice(
+            &axum::body::to_bytes(per_dev.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dev_list.len(), 1);
+        assert_eq!(dev_list[0]["deviceId"], "dog-01");
+    }
+
+    #[tokio::test]
+    async fn universal_arm64_release_matches_multiple_boards_and_rewrites_manifest_before_signing()
+    {
+        let dir = TestDir::new();
+        let token = "test-bearer-token-1234567890";
+        let (cfg, signing_key) = write_test_env(
+            dir.path(),
+            serde_json::json!({
+                "dog-rdk": {
+                    "model": "THUNDER 01",
+                    "hardwareRevision": "rdk-s100p",
+                    "enabled": true,
+                    "ring": "canary",
+                    "tags": ["dog3"]
+                },
+                "dog-nx": {
+                    "model": "THUNDER 01",
+                    "hardwareRevision": "jetson-xavier-nx",
+                    "enabled": true,
+                    "ring": "canary",
+                    "tags": ["dog4"]
+                }
+            }),
+            serde_json::json!({
+                "manifestVersion": 1,
+                "releaseId": "brainstem-0.0.6-qa",
+                "channel": "qa",
+                "sequence": 210,
+                "version": "0.0.6-qa.1",
+                "issuedAtMs": 0,
+                "expiresAtMs": 1800000,
+                "model": "THUNDER 01",
+                "hardwareRevision": "arm64-universal",
+                "minimumBootloaderVersion": "1.0.0",
+                "minimumBrainstemVersion": "0.0.1",
+                "minimumBatteryPercent": 20,
+                "artifactUrl": "https://placeholder.invalid/signed",
+                "artifactSizeBytes": 4096,
+                "artifactSha256": "a".repeat(64),
+                "keyId": "release-key-2026-01",
+                "rollbackPolicy": { "mode": "automatic", "healthTimeoutMs": 30000 },
+                "artifactType": "brainstem_release"
+            }),
+            "firmware/qa/brainstem-0.0.6-qa/brainstem.tar.gz",
+            "brainstem-0.0.6-qa",
+        );
+        let verifying_key = signing_key.verifying_key();
+        let app = build_router(cfg).unwrap();
+
+        for dev in ["dog-rdk", "dog-nx"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/v1/devices/{dev}/firmware/releases"))
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let rels: Vec<serde_json::Value> = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), 65536).await.unwrap(),
+            )
+            .unwrap();
+            assert_eq!(rels.len(), 1);
+            assert_eq!(rels[0]["releaseId"], "brainstem-0.0.6-qa");
+        }
+
+        let ro_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rollouts")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "rolloutId": "ro-universal-1",
+                            "releaseId": "brainstem-0.0.6-qa",
+                            "targetModel": "THUNDER 01",
+                            "stages": [{ "name": "canary", "ring": "canary", "percent": 100 }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ro_resp.status(), StatusCode::CREATED);
+
+        for (dev, expected_hw) in [("dog-rdk", "rdk-s100p"), ("dog-nx", "jetson-xavier-nx")] {
+            let next = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/v1/agent/devices/{dev}/next-job"))
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(next.status(), StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(next.into_body(), 65536).await.unwrap(),
+            )
+            .unwrap();
+            let env: doso_ota::ManifestEnvelope =
+                serde_json::from_value(body["manifest"].clone()).unwrap();
+            let manifest = env.decode(&verifying_key).unwrap();
+            assert_eq!(manifest.hardware_revision, expected_hw);
+        }
     }
 }

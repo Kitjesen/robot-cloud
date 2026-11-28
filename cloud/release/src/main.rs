@@ -32,6 +32,14 @@ async fn main() -> Result<()> {
             );
             ttl
         },
+        app_download_base_url: env::var("DOSO_APP_DOWNLOAD_BASE_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        app_download_accel_prefix: env::var("DOSO_APP_DOWNLOAD_ACCEL_PREFIX")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
     };
     let bind = env::var("DOSO_RELEASE_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8140".into())
