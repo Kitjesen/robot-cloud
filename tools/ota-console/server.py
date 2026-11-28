@@ -1821,6 +1821,81 @@ def make_handler(ctx: ConsoleContext) -> type[BaseHTTPRequestHandler]:
                     self._send_json(HTTPStatus.OK, res)
                     return
 
+                if path == "/api/cloud/exec":
+                    cfg = ctx.config_store.effective()
+                    res = cloud_ops.cloud_exec_command(
+                        cfg,
+                        str(body.get("command") or ""),
+                        cwd=str(body.get("cwd") or "/home/admin"),
+                        timeout_s=int(body.get("timeoutSeconds") or 30),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/cloud/files/list":
+                    cfg = ctx.config_store.effective()
+                    res = cloud_ops.cloud_list_dir(cfg, str(body.get("path") or "/opt/doso"))
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/cloud/files/read":
+                    cfg = ctx.config_store.effective()
+                    res = cloud_ops.cloud_read_text_file(cfg, str(body.get("path") or ""))
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/cloud/files/write":
+                    cfg = ctx.config_store.effective()
+                    res = cloud_ops.cloud_write_text_file(
+                        cfg,
+                        str(body.get("path") or ""),
+                        str(body.get("content") or ""),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/cloud/files/upload":
+                    cfg = ctx.config_store.effective()
+                    local_path, orig_name = ctx.uploads.resolve_record(str(body.get("uploadId") or "").strip())
+                    res = cloud_ops.cloud_upload_file(
+                        cfg,
+                        str(body.get("remoteDir") or "/tmp"),
+                        local_path,
+                        str(body.get("filename") or orig_name),
+                    )
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/cloud/files/download":
+                    cfg = ctx.config_store.effective()
+                    fname, data = cloud_ops.cloud_download_file_bytes(cfg, str(body.get("path") or ""))
+                    try:
+                        self.send_response(HTTPStatus.OK)
+                        self._send_security_headers()
+                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header(
+                            "Content-Disposition",
+                            f"attachment; filename*=UTF-8''{urllib.parse.quote(fname)}",
+                        )
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        pass
+                    return
+
+                if path == "/api/cloud/files/mkdir":
+                    cfg = ctx.config_store.effective()
+                    res = cloud_ops.cloud_make_dir(cfg, str(body.get("path") or ""))
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
+                if path == "/api/cloud/files/delete":
+                    cfg = ctx.config_store.effective()
+                    res = cloud_ops.cloud_delete_path(cfg, str(body.get("path") or ""))
+                    self._send_json(HTTPStatus.OK, res)
+                    return
+
                 if path == "/api/cloud/oss/upload":
                     res = ctx.upload_oss_object(body)
                     self._send_json(HTTPStatus.OK, res)

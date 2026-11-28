@@ -994,6 +994,39 @@ class OtaConsoleTests(unittest.TestCase):
             self.assertEqual(pub_gh["releaseId"], "brainstem-0.0.5-stable-s205")
             self.assertEqual(pub_gh["steps"][0]["step"], "download")
 
+        # Cloud command guardrails & protected cloud file path guards
+        self.assertEqual(co.validate_cloud_command("df -h"), "df -h")
+        for dangerous in ("rm -rf /", "sudo shutdown -h now", "reboot", "mkfs.ext4 /dev/sda1"):
+            with self.assertRaises(co.CloudOpsError):
+                co.validate_cloud_command(dangerous)
+
+        st_exec_bad, exec_bad = self._req("POST", "/api/cloud/exec", body={"command": "rm -rf /"})
+        self.assertEqual(st_exec_bad, 400)
+        self.assertIn("高危", exec_bad["error"])
+
+        with mock.patch.object(
+            co,
+            "cloud_exec_command",
+            return_value={
+                "ok": True,
+                "exitCode": 0,
+                "command": "pwd",
+                "cwd": "/opt/doso",
+                "nextCwd": "/opt/doso",
+                "stdout": "/opt/doso",
+                "stderr": "",
+                "durationMs": 12,
+                "truncated": False,
+            },
+        ):
+            st_exec, exec_res = self._req("POST", "/api/cloud/exec", body={"command": "pwd", "cwd": "/opt/doso"})
+            self.assertEqual(st_exec, 200)
+            self.assertEqual(exec_res["stdout"], "/opt/doso")
+
+        st_del_cprot, cprot = self._req("POST", "/api/cloud/files/delete", body={"path": "/var/lib/doso-ota-release"})
+        self.assertEqual(st_del_cprot, 400)
+        self.assertIn("受保护", cprot["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

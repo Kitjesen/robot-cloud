@@ -38,6 +38,13 @@
     ossKeyTouched: false,
     ghReleases: [],
     ghRepoLoaded: "",
+    cloudPath: "/opt/doso",
+    cloudFilesLoaded: false,
+    cloudQuickDirs: [],
+    cloudShellCwd: "/home/admin",
+    cloudShellHistory: [],
+    cloudShellHistIdx: -1,
+    fileEditScope: "robot",
   };
 
   const VIEW_META = {
@@ -246,6 +253,8 @@
     if (viewName === "cloud") {
       if (STATE.cloudTab === "server" && !STATE.cloudLoaded) {
         loadCloudServerStatus(true);
+      } else if (STATE.cloudTab === "files" && !STATE.cloudFilesLoaded) {
+        loadCloudFiles(STATE.cloudPath);
       } else if (STATE.cloudTab === "oss" && !STATE.ossLoaded) {
         loadOssObjects(true);
       }
@@ -1594,16 +1603,128 @@
   }
 
   function setCloudTab(tab) {
-    STATE.cloudTab = tab === "oss" ? "oss" : "server";
+    const valid = new Set(["server", "files", "shell", "oss"]);
+    STATE.cloudTab = valid.has(tab) ? tab : "server";
     document.querySelectorAll("#cloud-subtabs .hub-tab").forEach((b) => {
       b.classList.toggle("active", b.dataset.cloudTab === STATE.cloudTab);
     });
     $("cloud-pane-server").classList.toggle("active", STATE.cloudTab === "server");
+    $("cloud-pane-files").classList.toggle("active", STATE.cloudTab === "files");
+    $("cloud-pane-shell").classList.toggle("active", STATE.cloudTab === "shell");
     $("cloud-pane-oss").classList.toggle("active", STATE.cloudTab === "oss");
     if (STATE.cloudTab === "server" && !STATE.cloudLoaded) {
       loadCloudServerStatus(true);
+    } else if (STATE.cloudTab === "files" && !STATE.cloudFilesLoaded) {
+      loadCloudFiles(STATE.cloudPath);
+    } else if (STATE.cloudTab === "shell") {
+      const cfg = STATE.overview?.config;
+      if (cfg && $("cloud-shell-host-meta")) {
+        $("cloud-shell-host-meta").textContent = `${cfg.opsJumpUser || "admin"}@${cfg.opsJumpHost || "47.103.89.137"}`;
+      }
+      setTimeout(() => $("cloud-shell-input")?.focus(), 40);
     } else if (STATE.cloudTab === "oss" && !STATE.ossLoaded) {
       loadOssObjects(true);
+    }
+  }
+
+  function renderCloudQuickDirs() {
+    const wrap = $("cloud-quick-dirs");
+    if (!wrap) return;
+    wrap.innerHTML = (STATE.cloudQuickDirs || [])
+      .map((d) => `<button type="button" class="chip-btn" data-cloud-quick-dir="${esc(d.path)}">${esc(d.label)}</button>`)
+      .join("");
+  }
+
+  async function loadCloudFiles(pathStr) {
+    const targetPath = (pathStr || STATE.cloudPath || "/opt/doso").trim();
+    const tbody = $("cloud-files-tbody");
+    tbody.innerHTML = `<tr><td colspan="5" class="empty-cell">正在读取目录…</td></tr>`;
+    try {
+      const res = await apiFetch("/api/cloud/files/list", { json: { path: targetPath } });
+      STATE.cloudPath = res.path;
+      STATE.cloudFilesLoaded = true;
+      if (Array.isArray(res.quickDirs) && res.quickDirs.length) {
+        STATE.cloudQuickDirs = res.quickDirs;
+        renderCloudQuickDirs();
+      }
+      $("cfs-path-input").value = res.path;
+      $("btn-cfs-up").disabled = !res.parent;
+      $("btn-cfs-up").dataset.parent = res.parent || "";
+      const entries = res.entries || [];
+      if (!entries.length) {
+        tbody.innerHTML = `<tr><td colspan="5" class="empty-cell">空目录</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = entries
+        .map((f) => {
+          const nameCell = f.isDir
+            ? `<button class="dir-link" data-cfs-open-dir="${esc(f.path)}" type="button">${esc(f.name)}/</button>`
+            : `<span class="mono">${esc(f.name)}</span>${f.isLink ? ` <span class="badge badge-neutral">链接</span>` : ""}`;
+          const acts = f.isDir
+            ? `<button class="btn btn-sm btn-ghost" data-cfs-open-dir="${esc(f.path)}" type="button">打开</button>
+               <button class="btn btn-sm btn-danger" data-cfs-del="${esc(f.path)}" type="button">删除</button>`
+            : `<button class="btn btn-sm btn-ghost" data-cfs-edit="${esc(f.path)}" type="button">编辑</button>
+               <button class="btn btn-sm btn-ghost" data-cfs-dl="${esc(f.path)}" type="button">下载</button>
+               <button class="btn btn-sm btn-danger" data-cfs-del="${esc(f.path)}" type="button">删除</button>`;
+          return `
+            <tr>
+              <td>${nameCell}</td>
+              <td class="mono">${f.isDir ? "—" : formatBytes(f.sizeBytes)}</td>
+              <td class="mono">${esc(f.mode)}</td>
+              <td class="sub-line">${formatTime(f.modifiedAtMs)}</td>
+              <td class="col-actions">${acts}</td>
+            </tr>`;
+        })
+        .join("");
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty-cell">${esc(err.message)}</td></tr>`;
+      toast(err.message, "err");
+    }
+  }
+
+  async function runCloudShellCommand(rawCmd) {
+    const cmd = String(rawCmd || "").trim();
+    if (!cmd) return;
+    const term = $("cloud-term-output");
+    const runBtn = $("btn-cloud-shell-run");
+    const input = $("cloud-shell-input");
+    if (!STATE.cloudShellHistory.length || STATE.cloudShellHistory[STATE.cloudShellHistory.length - 1] !== cmd) {
+      STATE.cloudShellHistory.push(cmd);
+      if (STATE.cloudShellHistory.length > 50) STATE.cloudShellHistory.shift();
+    }
+    STATE.cloudShellHistIdx = STATE.cloudShellHistory.length;
+
+    const entry = document.createElement("div");
+    entry.className = "term-entry";
+    entry.innerHTML = `<div class="term-cmd">${esc(STATE.cloudShellCwd)} $ ${esc(cmd)}</div><div class="term-meta">执行中…</div>`;
+    term.appendChild(entry);
+    term.scrollTop = term.scrollHeight;
+    runBtn.disabled = true;
+    input.disabled = true;
+    try {
+      const res = await apiFetch("/api/cloud/exec", {
+        json: { command: cmd, cwd: STATE.cloudShellCwd, timeoutSeconds: 30 },
+      });
+      if (res.nextCwd) {
+        STATE.cloudShellCwd = res.nextCwd;
+        $("cloud-shell-cwd").textContent = res.nextCwd;
+      }
+      const parts = [`<div class="term-cmd">${esc(res.cwd)} $ ${esc(res.command)}</div>`];
+      if (res.stdout) parts.push(`<pre class="term-out">${esc(res.stdout)}</pre>`);
+      if (res.stderr) parts.push(`<pre class="term-err">${esc(res.stderr)}</pre>`);
+      parts.push(`<div class="term-meta">exit ${res.exitCode} · ${res.durationMs} ms${res.truncated ? " · 已截断" : ""}</div>`);
+      entry.innerHTML = parts.join("");
+    } catch (err) {
+      entry.innerHTML = `<div class="term-cmd">${esc(STATE.cloudShellCwd)} $ ${esc(cmd)}</div><pre class="term-err">${esc(
+        err.message
+      )}</pre>`;
+      toast(err.message, "err");
+    } finally {
+      runBtn.disabled = false;
+      input.disabled = false;
+      input.value = "";
+      input.focus();
+      term.scrollTop = term.scrollHeight;
     }
   }
 
@@ -1877,7 +1998,8 @@
     $("btn-refresh").addEventListener("click", () => {
       if (STATE.view === "cloud") {
         if (STATE.cloudTab === "oss") loadOssObjects(false);
-        else loadCloudServerStatus(false);
+        else if (STATE.cloudTab === "files") loadCloudFiles(STATE.cloudPath);
+        else if (STATE.cloudTab === "server") loadCloudServerStatus(false);
         return;
       }
       refreshAll(false, true);
@@ -2365,6 +2487,141 @@
       }
     });
 
+    // Cloud Server File Manager Events
+    $("cloud-quick-dirs")?.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-cloud-quick-dir]");
+      if (btn) loadCloudFiles(btn.dataset.cloudQuickDir);
+    });
+    $("btn-cfs-open-shell")?.addEventListener("click", () => {
+      STATE.cloudShellCwd = STATE.cloudPath || "/opt/doso";
+      $("cloud-shell-cwd").textContent = STATE.cloudShellCwd;
+      setCloudTab("shell");
+    });
+    $("btn-cfs-up")?.addEventListener("click", () => {
+      const p = $("btn-cfs-up").dataset.parent;
+      if (p) loadCloudFiles(p);
+    });
+    $("btn-cfs-go")?.addEventListener("click", () => loadCloudFiles($("cfs-path-input").value.trim()));
+    $("cfs-path-input")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        loadCloudFiles($("cfs-path-input").value.trim());
+      }
+    });
+    $("btn-cfs-mkdir")?.addEventListener("click", async () => {
+      const name = window.prompt("输入新目录名");
+      if (!name || !name.trim()) return;
+      const base = (STATE.cloudPath || "/opt/doso").replace(/\/+$/, "");
+      try {
+        await apiFetch("/api/cloud/files/mkdir", { json: { path: `${base}/${name.trim()}` } });
+        toast("目录已创建", "ok");
+        await loadCloudFiles(STATE.cloudPath);
+      } catch (err) {
+        toast(err.message, "err");
+      }
+    });
+    $("btn-cfs-upload")?.addEventListener("click", () => $("cfs-upload-input").click());
+    $("cfs-upload-input")?.addEventListener("change", async () => {
+      const file = $("cfs-upload-input").files?.[0];
+      $("cfs-upload-input").value = "";
+      if (!file) return;
+      try {
+        toast(`正在上传 ${file.name}…`);
+        const rec = await uploadRawFile(file, null);
+        await apiFetch("/api/cloud/files/upload", {
+          json: { remoteDir: STATE.cloudPath, uploadId: rec.uploadId, filename: file.name },
+        });
+        toast(`${file.name} 已上传至云端`, "ok");
+        await loadCloudFiles(STATE.cloudPath);
+      } catch (err) {
+        toast(err.message, "err");
+      }
+    });
+    $("cloud-files-tbody")?.addEventListener("click", async (e) => {
+      const openDir = e.target.closest("[data-cfs-open-dir]");
+      if (openDir) {
+        loadCloudFiles(openDir.dataset.cfsOpenDir);
+        return;
+      }
+      const editBtn = e.target.closest("[data-cfs-edit]");
+      if (editBtn) {
+        try {
+          const res = await apiFetch("/api/cloud/files/read", { json: { path: editBtn.dataset.cfsEdit } });
+          STATE.fileEditScope = "cloud";
+          $("drawer-file-title").textContent = res.path;
+          $("file-edit-path").value = res.path;
+          $("file-edit-content").value = res.content;
+          openDrawer("drawer-file-edit");
+        } catch (err) {
+          toast(err.message, "err");
+        }
+        return;
+      }
+      const dlBtn = e.target.closest("[data-cfs-dl]");
+      if (dlBtn) {
+        try {
+          const p = dlBtn.dataset.cfsDl;
+          const resp = await fetch("/api/cloud/files/download", {
+            method: "POST",
+            headers: { "X-DOSO-Console": "1", "Content-Type": "application/json" },
+            body: JSON.stringify({ path: p }),
+          });
+          if (!resp.ok) {
+            const errObj = await resp.json().catch(() => ({}));
+            throw new Error(errObj.error || `下载失败 (${resp.status})`);
+          }
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = p.split("/").pop() || "file";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        } catch (err) {
+          toast(err.message, "err");
+        }
+        return;
+      }
+      const delBtn = e.target.closest("[data-cfs-del]");
+      if (delBtn) {
+        const p = delBtn.dataset.cfsDel;
+        if (!window.confirm(`确认删除云端路径 ${p}？`)) return;
+        try {
+          await apiFetch("/api/cloud/files/delete", { json: { path: p } });
+          toast("已删除", "ok");
+          await loadCloudFiles(STATE.cloudPath);
+        } catch (err) {
+          toast(err.message, "err");
+        }
+      }
+    });
+
+    // Cloud Command Console Events
+    $("cloud-shell-presets")?.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-shell-cmd]");
+      if (btn) runCloudShellCommand(btn.dataset.shellCmd);
+    });
+    $("btn-cloud-shell-clear")?.addEventListener("click", () => {
+      $("cloud-term-output").innerHTML = `<div class="term-meta">输出已清空</div>`;
+    });
+    $("cloud-shell-form")?.addEventListener("submit", (e) => {
+      e.preventDefault();
+      runCloudShellCommand($("cloud-shell-input").value);
+    });
+    $("cloud-shell-input")?.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowUp" && STATE.cloudShellHistory.length) {
+        e.preventDefault();
+        STATE.cloudShellHistIdx = Math.max(0, STATE.cloudShellHistIdx - 1);
+        $("cloud-shell-input").value = STATE.cloudShellHistory[STATE.cloudShellHistIdx] || "";
+      } else if (e.key === "ArrowDown" && STATE.cloudShellHistory.length) {
+        e.preventDefault();
+        STATE.cloudShellHistIdx = Math.min(STATE.cloudShellHistory.length, STATE.cloudShellHistIdx + 1);
+        $("cloud-shell-input").value = STATE.cloudShellHistory[STATE.cloudShellHistIdx] || "";
+      }
+    });
+
     // OSS Storage Events
     $("btn-oss-refresh").addEventListener("click", () => loadOssObjects(false));
     $("oss-search").addEventListener("input", () => renderOssObjects());
@@ -2732,6 +2989,7 @@
           const res = await apiFetch("/api/ops/files/read", {
             json: { target: currentOpsTarget(), path: editBtn.dataset.fsEdit },
           });
+          STATE.fileEditScope = "robot";
           $("drawer-file-title").textContent = res.path;
           $("file-edit-path").value = res.path;
           $("file-edit-content").value = res.content;
@@ -2785,16 +3043,28 @@
     $("file-edit-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       try {
-        await apiFetch("/api/ops/files/write", {
-          json: {
-            target: currentOpsTarget(),
-            path: $("file-edit-path").value,
-            content: $("file-edit-content").value,
-          },
-        });
-        toast("文件已保存", "ok");
-        closeDrawer("drawer-file-edit");
-        await loadOpsFiles(STATE.opsPath);
+        if (STATE.fileEditScope === "cloud") {
+          await apiFetch("/api/cloud/files/write", {
+            json: {
+              path: $("file-edit-path").value,
+              content: $("file-edit-content").value,
+            },
+          });
+          toast("云端文件已保存", "ok");
+          closeDrawer("drawer-file-edit");
+          await loadCloudFiles(STATE.cloudPath);
+        } else {
+          await apiFetch("/api/ops/files/write", {
+            json: {
+              target: currentOpsTarget(),
+              path: $("file-edit-path").value,
+              content: $("file-edit-content").value,
+            },
+          });
+          toast("文件已保存", "ok");
+          closeDrawer("drawer-file-edit");
+          await loadOpsFiles(STATE.opsPath);
+        }
       } catch (err) {
         toast(err.message, "err");
       }

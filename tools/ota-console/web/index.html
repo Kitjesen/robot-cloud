@@ -488,6 +488,8 @@
         <section class="view" id="view-cloud">
           <div class="hub-tabs" id="cloud-subtabs">
             <button type="button" class="hub-tab active" data-cloud-tab="server">云服务器</button>
+            <button type="button" class="hub-tab" data-cloud-tab="files">云端文件</button>
+            <button type="button" class="hub-tab" data-cloud-tab="shell">云端终端</button>
             <button type="button" class="hub-tab" data-cloud-tab="oss">OSS 存储 <span class="tab-pill" id="tab-count-oss">0</span></button>
           </div>
 
@@ -551,7 +553,71 @@
             </div>
           </div>
 
-          <!-- Cloud Tab 2: Private OSS Storage -->
+          <!-- Cloud Tab 2: Cloud Server File Manager -->
+          <div class="cloud-pane" id="cloud-pane-files">
+            <div class="section-block">
+              <div class="section-head">
+                <h2>云端文件管理</h2>
+                <button class="btn btn-ghost btn-sm" id="btn-cfs-open-shell" type="button">在此打开终端</button>
+              </div>
+              <div class="quick-chips" id="cloud-quick-dirs" style="margin-bottom:12px;"></div>
+              <div class="file-toolbar">
+                <button class="btn btn-ghost btn-sm" id="btn-cfs-up" type="button">上级目录</button>
+                <input id="cfs-path-input" type="text" value="/opt/doso" class="mono" style="flex:1;" />
+                <button class="btn btn-ghost btn-sm" id="btn-cfs-go" type="button">前往</button>
+                <button class="btn btn-ghost btn-sm" id="btn-cfs-mkdir" type="button">新建目录</button>
+                <input type="file" id="cfs-upload-input" hidden />
+                <button class="btn btn-primary btn-sm" id="btn-cfs-upload" type="button">上传文件</button>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>名称</th>
+                      <th>大小</th>
+                      <th>权限</th>
+                      <th>修改时间</th>
+                      <th class="col-actions">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cloud-files-tbody">
+                    <tr><td colspan="5" class="empty-cell">加载中…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cloud Tab 3: Cloud Server Command Console -->
+          <div class="cloud-pane" id="cloud-pane-shell">
+            <div class="section-block">
+              <div class="section-head">
+                <h2>云端命令行</h2>
+                <div class="section-actions">
+                  <span class="sub-line mono" id="cloud-shell-host-meta">admin@47.103.89.137</span>
+                  <button class="btn btn-ghost btn-sm" id="btn-cloud-shell-clear" type="button">清空</button>
+                </div>
+              </div>
+              <div class="quick-chips" id="cloud-shell-presets" style="margin-bottom:12px;">
+                <button type="button" class="chip-btn" data-shell-cmd="df -h">磁盘 df -h</button>
+                <button type="button" class="chip-btn" data-shell-cmd="free -h">内存 free -h</button>
+                <button type="button" class="chip-btn" data-shell-cmd="sudo -n docker ps --format 'table {{.Names}}\t{{.Status}}'">容器 docker ps</button>
+                <button type="button" class="chip-btn" data-shell-cmd="ss -tln | head -n 30">端口监听</button>
+                <button type="button" class="chip-btn" data-shell-cmd="sudo -n nginx -t">Nginx 校验</button>
+                <button type="button" class="chip-btn" data-shell-cmd="ls -la">列出目录</button>
+              </div>
+              <div class="term-box" id="cloud-term-output" role="log" aria-live="polite">
+                <div class="term-meta">已就绪，输入命令后按回车执行（支持 cd 切换目录与 ↑/↓ 历史记录）</div>
+              </div>
+              <form class="term-bar" id="cloud-shell-form">
+                <span class="term-cwd mono" id="cloud-shell-cwd">/home/admin</span>
+                <input id="cloud-shell-input" type="text" class="mono" placeholder="输入 Linux 命令，例如 ls -la /opt/doso" autocomplete="off" spellcheck="false" />
+                <button class="btn btn-primary btn-sm" id="btn-cloud-shell-run" type="submit">执行</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- Cloud Tab 4: Private OSS Storage -->
           <div class="cloud-pane" id="cloud-pane-oss">
             <div class="metrics">
               <div class="metric">

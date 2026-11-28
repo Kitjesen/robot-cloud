@@ -18,9 +18,11 @@ import http.client
 import json
 import mimetypes
 from pathlib import Path
+import posixpath
 import re
 import shlex
 import socket
+import stat
 import subprocess
 import time
 from typing import Any
@@ -948,3 +950,433 @@ def download_github_release_asset(
         raise CloudOpsError(f"GitHub 资产校验不一致: 预期 {exp[:12]}，实际 {actual_sha[:12]}")
 
     return {"path": str(dest_path), "sizeBytes": total, "sha256": actual_sha}
+
+
+# ---------- Cloud Server File Manager & Interactive Command Console ----------
+
+CLOUD_QUICK_DIRS: tuple[dict[str, str], ...] = (
+    {"label": "主目录 /opt/doso", "path": "/opt/doso"},
+    {"label": "OTA 数据", "path": "/var/lib/doso-ota-release"},
+    {"label": "Nginx 配置", "path": "/etc/nginx"},
+    {"label": "运维主目录", "path": "/home/admin"},
+    {"label": "临时目录", "path": "/tmp"},
+)
+
+CLOUD_PROTECTED_PATHS = frozenset(
+    {
+        "/",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/etc/doso",
+        "/etc/nginx",
+        "/etc/ssh",
+        "/home",
+        "/home/admin",
+        "/home/admin/.ssh",
+        "/lib",
+        "/lib64",
+        "/opt",
+        "/opt/doso",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/usr/local",
+        "/usr/local/lib/doso-ota-release",
+        "/var",
+        "/var/lib",
+        "/var/lib/docker",
+        "/var/lib/doso-ota-release",
+    }
+)
+
+CLOUD_MAX_TEXT_EDIT_BYTES = 512 * 1024
+CLOUD_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
+CLOUD_MAX_SHELL_OUTPUT_BYTES = 256 * 1024
+
+_DANGEROUS_CMD_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\brm\s+-[^\n]*r[^\n]*f[^\n]*\s+/(\*|\s|$)", re.IGNORECASE),
+    re.compile(r"\brm\s+-[^\n]*f[^\n]*r[^\n]*\s+/(\*|\s|$)", re.IGNORECASE),
+    re.compile(r"\bmkfs(?:\.[a-z0-9]+)?\b", re.IGNORECASE),
+    re.compile(r"\bdd\s+[^\n]*\bof=/dev/", re.IGNORECASE),
+    re.compile(r"(?:^|[;&|]\s*)(?:sudo\s+(?:-n\s+)?)?(?:shutdown|reboot|poweroff|halt|init\s+[06])\b", re.IGNORECASE),
+    re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),
+    re.compile(r"\bchmod\s+-R\s+777\s+/(\s|$)", re.IGNORECASE),
+)
+
+
+def validate_cloud_command(command: str) -> str:
+    cmd = str(command or "").strip()
+    if not cmd:
+        raise CloudOpsError("请输入要执行的命令")
+    if len(cmd) > 4000:
+        raise CloudOpsError("命令长度超过上限")
+    if "\0" in cmd:
+        raise CloudOpsError("命令包含非法空字符")
+    for pat in _DANGEROUS_CMD_PATTERNS:
+        if pat.search(cmd):
+            raise CloudOpsError("高危系统命令已拦截")
+    return cmd
+
+
+def _norm_cloud_path(raw: str) -> str:
+    try:
+        return robot_ops.normalize_remote_path(raw)
+    except robot_ops.RobotOpsError as exc:
+        raise CloudOpsError(str(exc)) from exc
+
+
+def cloud_exec_command(
+    cfg: dict[str, str],
+    command: str,
+    cwd: str = "/home/admin",
+    timeout_s: int = 30,
+) -> dict[str, Any]:
+    """Execute a shell command on SWAS cloud host and track updated working directory."""
+    cmd = validate_cloud_command(command)
+    work_dir = _norm_cloud_path(cwd or "/home/admin")
+    clamped_timeout = max(5, min(60, int(timeout_s or 30)))
+    marker = "__DOSO_CLOUD_CWD_7f3a__:"
+    # Preserve user exit code while capturing resulting pwd (so `cd /etc/nginx` works naturally).
+    script = (
+        f"cd {shlex.quote(work_dir)} 2>/dev/null || {{ echo '目录不存在或无权限: {work_dir}' >&2; exit 2; }}\n"
+        f"{cmd}\n"
+        "__doso_rc=$?\n"
+        f"printf '\\n{marker}%s\\n' \"$(pwd)\"\n"
+        "exit $__doso_rc\n"
+    )
+    t0 = time.monotonic()
+    jump = robot_ops._connect_jump(cfg, timeout_s=8)
+    try:
+        # Use sudo -n bash only when entering a root-only directory (e.g. /var/lib/doso-ota-release)
+        shell_cmd = (
+            f"if test -r {shlex.quote(work_dir)} -a -x {shlex.quote(work_dir)}; "
+            f"then bash -s; else sudo -n bash -s; fi"
+        )
+        code, raw_out, raw_err = robot_ops._exec_cmd(
+            jump,
+            shell_cmd,
+            timeout_s=clamped_timeout,
+            stdin_text=script,
+        )
+    except Exception as exc:
+        raise CloudOpsError(f"执行命令失败: {exc}") from exc
+    finally:
+        jump.close()
+
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    next_cwd = work_dir
+    out_text = raw_out
+    idx = raw_out.rfind(marker)
+    if idx != -1:
+        after = raw_out[idx + len(marker) :].splitlines()
+        if after and after[0].strip().startswith("/"):
+            next_cwd = after[0].strip()
+        out_text = raw_out[:idx].rstrip("\n")
+
+    truncated = False
+    if len(out_text.encode("utf-8", errors="replace")) > CLOUD_MAX_SHELL_OUTPUT_BYTES:
+        out_text = out_text[: CLOUD_MAX_SHELL_OUTPUT_BYTES] + "\n...[输出已截断]"
+        truncated = True
+    err_text = raw_err
+    if len(err_text.encode("utf-8", errors="replace")) > CLOUD_MAX_SHELL_OUTPUT_BYTES:
+        err_text = err_text[: CLOUD_MAX_SHELL_OUTPUT_BYTES] + "\n...[错误输出已截断]"
+        truncated = True
+
+    return {
+        "ok": code == 0,
+        "exitCode": code,
+        "command": cmd,
+        "cwd": work_dir,
+        "nextCwd": next_cwd,
+        "stdout": out_text,
+        "stderr": err_text,
+        "durationMs": duration_ms,
+        "truncated": truncated,
+    }
+
+
+def cloud_list_dir(cfg: dict[str, str], remote_path: str = "/opt/doso") -> dict[str, Any]:
+    norm = _norm_cloud_path(remote_path or "/opt/doso")
+    jump = robot_ops._connect_jump(cfg, timeout_s=8)
+    entries: list[dict[str, Any]] = []
+    try:
+        sftp = jump.open_sftp()
+        try:
+            attrs = sftp.listdir_attr(norm)
+            for attr in attrs:
+                name = attr.filename
+                mode = attr.st_mode or 0
+                entries.append(
+                    {
+                        "name": name,
+                        "path": posixpath.join(norm, name),
+                        "isDir": stat.S_ISDIR(mode),
+                        "isLink": stat.S_ISLNK(mode),
+                        "sizeBytes": int(attr.st_size or 0),
+                        "mode": oct(stat.S_IMODE(mode))[2:].zfill(3),
+                        "modifiedAtMs": int((attr.st_mtime or 0) * 1000),
+                    }
+                )
+        except PermissionError:
+            sftp.close()
+            py_script = (
+                "import json, os, posixpath, stat, sys\n"
+                "p = sys.argv[1]\n"
+                "out = []\n"
+                "for name in os.listdir(p):\n"
+                "    full = posixpath.join(p, name)\n"
+                "    st = os.lstat(full)\n"
+                "    m = st.st_mode\n"
+                "    is_dir = stat.S_ISDIR(m)\n"
+                "    is_link = stat.S_ISLNK(m)\n"
+                "    if is_link:\n"
+                "        try:\n"
+                "            is_dir = stat.S_ISDIR(os.stat(full).st_mode)\n"
+                "        except OSError:\n"
+                "            pass\n"
+                "    out.append({\n"
+                "        'name': name,\n"
+                "        'path': full,\n"
+                "        'isDir': is_dir,\n"
+                "        'isLink': is_link,\n"
+                "        'sizeBytes': int(st.st_size),\n"
+                "        'mode': oct(stat.S_IMODE(m))[2:].zfill(3),\n"
+                "        'modifiedAtMs': int(st.st_mtime * 1000),\n"
+                "    })\n"
+                "print(json.dumps(out))\n"
+            )
+            code, out, err = robot_ops._exec_cmd(
+                jump,
+                f"sudo -n python3 - {shlex.quote(norm)}",
+                timeout_s=10,
+                stdin_text=py_script,
+            )
+            if code != 0:
+                raise CloudOpsError(f"无法读取目录 {norm}: {(err or out).strip()}")
+            entries = json.loads(out)
+        except CloudOpsError:
+            raise
+        except Exception as exc:
+            raise CloudOpsError(f"无法读取目录 {norm}: {exc}") from exc
+        else:
+            sftp.close()
+    finally:
+        jump.close()
+
+    entries.sort(key=lambda e: (not e["isDir"], e["name"].lower()))
+    parent = posixpath.dirname(norm) if norm != "/" else None
+    return {
+        "path": norm,
+        "parent": parent,
+        "quickDirs": list(CLOUD_QUICK_DIRS),
+        "entries": entries,
+    }
+
+
+def cloud_read_text_file(cfg: dict[str, str], remote_path: str) -> dict[str, Any]:
+    norm = _norm_cloud_path(remote_path)
+    jump = robot_ops._connect_jump(cfg, timeout_s=8)
+    try:
+        sftp = jump.open_sftp()
+        try:
+            st = sftp.stat(norm)
+            if stat.S_ISDIR(st.st_mode or 0):
+                raise CloudOpsError("不能以文本方式打开目录")
+            if (st.st_size or 0) > CLOUD_MAX_TEXT_EDIT_BYTES:
+                raise CloudOpsError("文件超过 512 KB，请使用下载")
+            with sftp.open(norm, "rb") as fh:
+                raw = fh.read(CLOUD_MAX_TEXT_EDIT_BYTES + 1)
+        except PermissionError:
+            sftp.close()
+            code, out, err = robot_ops._exec_cmd(
+                jump, f"sudo -n head -c {CLOUD_MAX_TEXT_EDIT_BYTES + 1} {shlex.quote(norm)}", timeout_s=10
+            )
+            if code != 0:
+                raise CloudOpsError(f"读取文件失败: {err.strip()}")
+            raw = out.encode("utf-8")
+        except CloudOpsError:
+            raise
+        except Exception as exc:
+            raise CloudOpsError(f"读取文件失败: {exc}") from exc
+        else:
+            sftp.close()
+    finally:
+        jump.close()
+
+    if len(raw) > CLOUD_MAX_TEXT_EDIT_BYTES:
+        raise CloudOpsError("文件超过 512 KB，请使用下载")
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CloudOpsError("该文件不是 UTF-8 文本，请使用下载") from exc
+    return {"path": norm, "sizeBytes": len(raw), "content": content}
+
+
+def cloud_write_text_file(cfg: dict[str, str], remote_path: str, content: str) -> dict[str, Any]:
+    norm = _norm_cloud_path(remote_path)
+    if norm in CLOUD_PROTECTED_PATHS:
+        raise CloudOpsError("禁止直接覆盖系统关键路径")
+    encoded = content.encode("utf-8")
+    if len(encoded) > CLOUD_MAX_TEXT_EDIT_BYTES:
+        raise CloudOpsError("保存内容超过 512 KB 上限")
+
+    ts = time.strftime("%Y%m%d%H%M%S")
+    jump = robot_ops._connect_jump(cfg, timeout_s=8)
+    try:
+        sftp = jump.open_sftp()
+        tmp_remote = f"/tmp/.doso-cloud-edit-{int(time.time() * 1000)}"
+        try:
+            with sftp.open(tmp_remote, "wb") as fh:
+                fh.write(encoded)
+        finally:
+            sftp.close()
+
+        inner = (
+            f"if sudo -n test -f {shlex.quote(norm)}; then "
+            f"sudo -n cp -a {shlex.quote(norm)} {shlex.quote(norm + '.bak.' + ts)}; fi; "
+            f"sudo -n sh -c 'cat \"$1\" > \"$2\"' _ {shlex.quote(tmp_remote)} {shlex.quote(norm)} "
+            f"&& rm -f {shlex.quote(tmp_remote)}"
+        )
+        code, _, err = robot_ops._exec_cmd(jump, inner, timeout_s=12)
+        if code != 0:
+            robot_ops._exec_cmd(jump, f"rm -f {shlex.quote(tmp_remote)}", timeout_s=5)
+            raise CloudOpsError(f"保存文件失败: {err.strip()}")
+    finally:
+        jump.close()
+    return {"path": norm, "sizeBytes": len(encoded), "saved": True}
+
+
+def cloud_upload_file(cfg: dict[str, str], remote_dir: str, local_path: Path, filename: str) -> dict[str, Any]:
+    norm_dir = _norm_cloud_path(remote_dir)
+    safe_name = Path(filename.replace("\\", "/")).name.strip()
+    if not safe_name or safe_name in (".", "..") or "/" in safe_name:
+        raise CloudOpsError("文件名无效")
+    dest = posixpath.join(norm_dir, safe_name)
+    size = local_path.stat().st_size
+
+    jump = robot_ops._connect_jump(cfg, timeout_s=12)
+    try:
+        sftp = jump.open_sftp()
+        try:
+            sftp.put(str(local_path), dest)
+        except PermissionError:
+            tmp_remote = f"/tmp/.doso-cloud-up-{int(time.time() * 1000)}_{safe_name}"
+            sftp.put(str(local_path), tmp_remote)
+            sftp.close()
+            code, _, err = robot_ops._exec_cmd(
+                jump, f"sudo -n mv -f {shlex.quote(tmp_remote)} {shlex.quote(dest)}", timeout_s=15
+            )
+            if code != 0:
+                robot_ops._exec_cmd(jump, f"rm -f {shlex.quote(tmp_remote)}", timeout_s=5)
+                raise CloudOpsError(f"写入目标目录失败: {err.strip()}")
+        except Exception as exc:
+            sftp.close()
+            raise CloudOpsError(f"上传失败: {exc}") from exc
+        else:
+            sftp.close()
+    finally:
+        jump.close()
+    return {"path": dest, "sizeBytes": size, "uploaded": True}
+
+
+def cloud_download_file_bytes(cfg: dict[str, str], remote_path: str) -> tuple[str, bytes]:
+    norm = _norm_cloud_path(remote_path)
+    filename = posixpath.basename(norm) or "download.bin"
+    jump = robot_ops._connect_jump(cfg, timeout_s=12)
+    try:
+        sftp = jump.open_sftp()
+        try:
+            st = sftp.stat(norm)
+            if stat.S_ISDIR(st.st_mode or 0):
+                raise CloudOpsError("不支持直接下载目录")
+            if (st.st_size or 0) > CLOUD_MAX_DOWNLOAD_BYTES:
+                raise CloudOpsError("文件超过 128 MB 下载上限")
+            with sftp.open(norm, "rb") as fh:
+                data = fh.read()
+        except PermissionError:
+            sftp.close()
+            code, out, err = robot_ops._exec_cmd(
+                jump, f"sudo -n stat -c '%s %F' {shlex.quote(norm)}", timeout_s=8
+            )
+            if code != 0:
+                raise CloudOpsError(f"无法访问文件: {err.strip()}")
+            parts = out.strip().split(" ", 1)
+            fsize = int(parts[0]) if parts and parts[0].isdigit() else 0
+            if len(parts) > 1 and "directory" in parts[1].lower():
+                raise CloudOpsError("不支持直接下载目录")
+            if fsize > CLOUD_MAX_DOWNLOAD_BYTES:
+                raise CloudOpsError("文件超过 128 MB 下载上限")
+            _, stdout, stderr = jump.exec_command(f"sudo -n cat {shlex.quote(norm)}", timeout=30)
+            data = stdout.read()
+            rc = stdout.channel.recv_exit_status()
+            if rc != 0:
+                raise CloudOpsError(f"下载失败: {stderr.read().decode('utf-8', errors='replace').strip()}")
+        except CloudOpsError:
+            raise
+        except Exception as exc:
+            raise CloudOpsError(f"下载失败: {exc}") from exc
+        else:
+            sftp.close()
+    finally:
+        jump.close()
+    return filename, data
+
+
+def cloud_make_dir(cfg: dict[str, str], remote_path: str) -> dict[str, Any]:
+    norm = _norm_cloud_path(remote_path)
+    jump = robot_ops._connect_jump(cfg, timeout_s=8)
+    try:
+        sftp = jump.open_sftp()
+        try:
+            sftp.mkdir(norm)
+        except PermissionError:
+            sftp.close()
+            code, _, err = robot_ops._exec_cmd(jump, f"sudo -n mkdir -p {shlex.quote(norm)}", timeout_s=10)
+            if code != 0:
+                raise CloudOpsError(f"创建目录失败: {err.strip()}")
+        except Exception as exc:
+            sftp.close()
+            raise CloudOpsError(f"创建目录失败: {exc}") from exc
+        else:
+            sftp.close()
+    finally:
+        jump.close()
+    return {"path": norm, "created": True}
+
+
+def cloud_delete_path(cfg: dict[str, str], remote_path: str) -> dict[str, Any]:
+    norm = _norm_cloud_path(remote_path)
+    if norm in CLOUD_PROTECTED_PATHS:
+        raise CloudOpsError(f"受保护的系统关键路径禁止删除: {norm}")
+    jump = robot_ops._connect_jump(cfg, timeout_s=8)
+    try:
+        sftp = jump.open_sftp()
+        try:
+            st = sftp.lstat(norm)
+            if stat.S_ISDIR(st.st_mode or 0):
+                sftp.rmdir(norm)
+            else:
+                sftp.remove(norm)
+        except PermissionError:
+            sftp.close()
+            code, _, err = robot_ops._exec_cmd(
+                jump,
+                f"if sudo -n test -d {shlex.quote(norm)}; then sudo -n rmdir {shlex.quote(norm)}; else sudo -n rm -f {shlex.quote(norm)}; fi",
+                timeout_s=10,
+            )
+            if code != 0:
+                raise CloudOpsError(f"删除失败（非空目录需先清空）: {err.strip()}")
+        except Exception as exc:
+            sftp.close()
+            raise CloudOpsError(f"删除失败: {exc}") from exc
+        else:
+            sftp.close()
+    finally:
+        jump.close()
+    return {"path": norm, "deleted": True}

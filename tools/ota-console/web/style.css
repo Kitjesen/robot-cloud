@@ -1384,6 +1384,80 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   flex-wrap: wrap;
 }
 
+.term-box {
+  min-height: 360px;
+  max-height: 520px;
+  overflow: auto;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.term-entry {
+  margin-bottom: 12px;
+}
+
+.term-cmd {
+  color: #60a5fa;
+  font-weight: 600;
+}
+
+.term-out {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  font-family: inherit;
+}
+
+.term-err {
+  margin: 4px 0 0;
+  color: #fca5a5;
+  white-space: pre-wrap;
+  font-family: inherit;
+}
+
+.term-meta {
+  color: #94a3b8;
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+
+.term-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.term-cwd {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: var(--hover-bg);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.term-bar input {
+  flex: 1;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
 .file-toolbar {
   display: flex;
   align-items: center;
